@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
+use tauri::Manager;
 use tauri_plugin_dialog::DialogExt;
 
 /// Global listener state shared across commands.
@@ -108,11 +109,35 @@ struct TransmissionHistory {
     entries: Vec<HistoryEntry>,
 }
 
-const HISTORY_PATH: &str = "C:\\LinkHub\\history.json";
+/// Best-effort cross-platform data dir, used only when no path is supplied by
+/// the frontend. Mirrors Tauri's `app_data_dir` layout (`<data>/com.linkhub.desktop`)
+/// without needing an `AppHandle`.
+fn fallback_data_dir() -> std::path::PathBuf {
+    #[cfg(windows)]
+    let base = std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    #[cfg(not(windows))]
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| std::path::PathBuf::from(home).join(".local").join("share"))
+        })
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("com.linkhub.desktop")
+}
+
+fn history_fallback() -> &'static str {
+    static FALLBACK: OnceLock<String> = OnceLock::new();
+    FALLBACK
+        .get_or_init(|| fallback_data_dir().join("history.json").display().to_string())
+        .as_str()
+}
 
 fn resolved_history_path(history_path: &str) -> &str {
     if history_path.trim().is_empty() {
-        HISTORY_PATH
+        history_fallback()
     } else {
         history_path
     }
@@ -177,6 +202,44 @@ fn load_identity(path: &str) -> Result<LocalIdentity, String> {
             .map_err(|err| format!("failed to load secure identity: {err}")),
         None => LocalIdentity::load_from_path(path)
             .map_err(|err| format!("failed to load identity: {err}")),
+    }
+}
+
+// ── Default paths (cross-platform) ─────────────────────────────────
+
+#[derive(Clone, Serialize)]
+struct DefaultConfig {
+    identity_path: String,
+    trust_store_path: String,
+    receive_dir: String,
+    history_path: String,
+    listener_addr: String,
+}
+
+/// OS-appropriate default paths under the app data dir, so the desktop client
+/// is not pinned to `C:\LinkHub` and can run on macOS/Linux. The frontend seeds
+/// these only when a setting is not already stored (existing setups untouched).
+#[tauri::command]
+fn default_config(app: tauri::AppHandle) -> DefaultConfig {
+    let base = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| fallback_data_dir());
+    let join = |name: &str| base.join(name).display().to_string();
+    // `secure:` (DPAPI) identity is only wired up on Windows; until the macOS
+    // Keychain / Linux Secret Service backends land, default to a plaintext
+    // identity file off-Windows.
+    let identity_path = if cfg!(windows) {
+        format!("secure:{}", base.join("local-identity.secure.txt").display())
+    } else {
+        base.join("local-identity.txt").display().to_string()
+    };
+    DefaultConfig {
+        identity_path,
+        trust_store_path: join("trust-store.txt"),
+        receive_dir: join("inbox"),
+        history_path: join("history.json"),
+        listener_addr: "127.0.0.1:8787".to_string(),
     }
 }
 
@@ -715,6 +778,7 @@ fn main() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            default_config,
             pairing_generate_qr,
             pairing_inspect,
             pairing_confirm,

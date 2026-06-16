@@ -135,4 +135,39 @@ function startAutoDiscovery() {
   autoDiscoveryTimer = setInterval(runAutoDiscoveryOnce, DISCOVERY_INTERVAL_MS);
 }
 
-window.addEventListener('DOMContentLoaded', startAutoDiscovery);
+// ── Cross-platform default paths ───────────────────────────────────
+// Ask the Rust side for OS-appropriate default paths (app data dir) and seed
+// them only when a setting is not already stored, so existing setups keep
+// their current paths and the client is no longer pinned to C:\LinkHub.
+
+async function seedDefaultPaths() {
+  let cfg;
+  try {
+    cfg = await tauriInvoke('default_config');
+  } catch (_) {
+    return; // not running under Tauri / command unavailable -> keep static defaults
+  }
+  const map = {
+    identityPath: cfg.identity_path,
+    trustStorePath: cfg.trust_store_path,
+    receiveDir: cfg.receive_dir,
+    historyPath: cfg.history_path,
+    listenerAddr: cfg.listener_addr,
+  };
+  Object.keys(map).forEach(key => {
+    if (!map[key]) return;
+    DEFAULTS[key] = map[key];
+    if (localStorage.getItem('linkhub_' + key) === null) setSetting(key, map[key]);
+  });
+  // The pairing tab built its settings inputs at load with the static defaults;
+  // rebuild it so they reflect the seeded OS-appropriate paths.
+  if (typeof buildPairingTab === 'function' &&
+      document.getElementById('tab-pairing')?.classList.contains('active')) {
+    buildPairingTab();
+  }
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
+  await seedDefaultPaths();
+  startAutoDiscovery();
+});
