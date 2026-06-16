@@ -1,0 +1,15 @@
+target/
+received/
+core-rs/received/
+build/
+.gradle/
+android/.gradle/
+android/app/build/
+android/local.properties
+android/.idea/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/schemas/
+*.apk
+*.log
+.DS_Store
+Thumbs.db

@@ -1,0 +1,228 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #f5f5f7;
+  --surface: #ffffff;
+  --border: #dcdce0;
+  --text: #1a1a2e;
+  --text-secondary: #6b6b80;
+  --accent: #4a90d8;
+  --accent-hover: #357abd;
+  --success: #2e8b57;
+  --danger: #c0392b;
+  --radius: 8px;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* ── Header ─────────────────────────── */
+.app-header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 16px 24px;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.app-header h1 { font-size: 1.5rem; font-weight: 700; }
+.app-header .subtitle { color: var(--text-secondary); font-size: 0.85rem; }
+
+/* ── Tabs ───────────────────────────── */
+.tab-bar {
+  display: flex;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 0 16px;
+}
+.tab-bar .tab {
+  border: none;
+  background: none;
+  padding: 12px 24px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  color: var(--text-secondary);
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s;
+}
+.tab-bar .tab:hover { color: var(--text); }
+.tab-bar .tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+/* ── Main content ───────────────────── */
+main {
+  flex: 1;
+  padding: 24px;
+  max-width: 800px;
+  width: 100%;
+  margin: 0 auto;
+}
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* ── Cards ──────────────────────────── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px;
+  margin-bottom: 16px;
+}
+.card h3 {
+  font-size: 1rem;
+  margin-bottom: 12px;
+  color: var(--text);
+}
+.card p { font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 8px; }
+
+/* ── Form elements ──────────────────── */
+.form-group { margin-bottom: 14px; }
+.form-group label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+}
+.form-group input[type="text"],
+.form-group input[type="file"],
+.form-group textarea,
+.form-group select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.9rem;
+  font-family: inherit;
+  color: var(--text);
+  background: #fafafa;
+}
+.form-group textarea { min-height: 60px; resize: vertical; }
+
+.inline-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.inline-row input { flex: 1; min-width: 0; }
+.inline-row .btn { white-space: nowrap; }
+
+.hint-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+.hint-row:last-child { border-bottom: none; }
+.hint-row code { color: var(--text); }
+
+.btn {
+  display: inline-block;
+  padding: 8px 20px;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-primary:hover { background: var(--accent-hover); }
+.btn-secondary { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── QR display ─────────────────────── */
+.qr-container {
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+  background: #fff;
+  border-radius: var(--radius);
+  border: 2px dashed var(--border);
+  margin: 12px 0;
+}
+.qr-container svg { max-width: 220px; max-height: 220px; }
+
+/* ── Device list ────────────────────── */
+.device-list { list-style: none; }
+.device-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+.device-item:last-child { border-bottom: none; }
+.device-item .device-name { font-weight: 600; }
+.device-item .device-meta { font-size: 0.75rem; color: var(--text-secondary); }
+
+/* ── Status / messages ──────────────── */
+.msg { padding: 10px 14px; border-radius: var(--radius); font-size: 0.85rem; margin-top: 10px; }
+.msg-success { background: #e8f5e9; color: var(--success); border: 1px solid #a5d6a7; }
+.msg-error { background: #fce4ec; color: var(--danger); border: 1px solid #ef9a9a; }
+.msg-info { background: #e3f2fd; color: var(--accent); border: 1px solid #90caf9; }
+
+.confirmation-code {
+  font-family: 'Courier New', monospace;
+  font-size: 1.8rem;
+  font-weight: 700;
+  letter-spacing: 4px;
+  text-align: center;
+  padding: 12px;
+  background: #f0f4ff;
+  border-radius: var(--radius);
+}
+
+/* ── Footer ─────────────────────────── */
+.status-bar {
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: 8px 24px;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+/* ── Settings gear ──────────────────── */
+.settings-toggle {
+  font-size: 0.8rem;
+  cursor: pointer;
+  color: var(--accent);
+  margin-bottom: 12px;
+  display: inline-block;
+}
+.settings-panel {
+  background: #fafafa;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+/* ── History table ──────────────────── */
+.history-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.history-table th { text-align: left; padding: 8px 10px; border-bottom: 2px solid var(--border); color: var(--text-secondary); font-size: 0.75rem; font-weight: 600; }
+.history-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); }
+
+/* ── Two-column ─────────────────────── */
+.pairing-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+@media (max-width: 640px) {
+  .pairing-grid { grid-template-columns: 1fr; }
+}

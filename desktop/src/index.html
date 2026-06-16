@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LinkHub</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <header class="app-header">
+    <h1>LinkHub</h1>
+    <span class="subtitle">Trusted Device Mesh</span>
+  </header>
+
+  <nav class="tab-bar">
+    <button class="tab active" data-tab="pairing">Pair</button>
+    <button class="tab" data-tab="devices">Devices</button>
+    <button class="tab" data-tab="send">Send</button>
+    <button class="tab" data-tab="history">History</button>
+    <button class="tab" data-tab="service">Service</button>
+  </nav>
+
+  <main>
+    <section id="tab-pairing" class="tab-content active"></section>
+    <section id="tab-devices" class="tab-content"></section>
+    <section id="tab-send" class="tab-content"></section>
+    <section id="tab-history" class="tab-content"></section>
+    <section id="tab-service" class="tab-content"></section>
+  </main>
+
+  <footer class="status-bar">
+    <span id="connection-status">Not connected</span>
+  </footer>
+
+  <script src="js/app.js"></script>
+  <script src="js/pairing.js"></script>
+  <script src="js/devices.js"></script>
+  <script src="js/send.js"></script>
+  <script src="js/history.js"></script>
+  <script src="js/service.js"></script>
+</body>
+</html>

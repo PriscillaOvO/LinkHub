@@ -1,0 +1,38 @@
+[package]
+name = "linkhub-core-prototype"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "linkhub_core"
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "linkhub-cli"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+flume = "0.11.1"
+mdns-sd = "0.20.0"
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10.8"
+snow = "0.9.6"
+uuid = { version = "1", features = ["v4"] }
+x25519-dalek = { version = "2.0.1", features = ["static_secrets", "getrandom"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = "4"
+tokio = { version = "1", features = ["rt"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = { version = "0.21", features = ["invocation"] }
