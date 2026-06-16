@@ -11,6 +11,11 @@ desktop/src-tauri/target/
 desktop/src-tauri/gen/schemas/
 android/app/src/main/jniLibs/**/*.so
 *.apk
+*.aab
+# Android release signing — never commit keystores or their passwords
+android/keystore.properties
+*.jks
+*.keystore
 *.log
 .DS_Store
 Thumbs.db

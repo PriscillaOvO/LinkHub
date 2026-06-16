@@ -1,7 +1,30 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
 }
+
+// Release signing credentials are read from android/keystore.properties (git-ignored)
+// or, as a fallback, from environment variables. Neither the keystore nor its
+// passwords are committed. If nothing is configured, the release build type is
+// left unsigned (assembleRelease then produces an unsigned APK) rather than failing.
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties().apply {
+    if (keystorePropertiesFile.exists()) {
+        keystorePropertiesFile.inputStream().use { load(it) }
+    }
+}
+
+fun signingValue(propKey: String, envKey: String): String? =
+    (keystoreProperties.getProperty(propKey) ?: System.getenv(envKey))?.takeIf { it.isNotBlank() }
+
+val releaseStoreFile = signingValue("storeFile", "LINKHUB_RELEASE_STORE_FILE")
+val releaseStorePassword = signingValue("storePassword", "LINKHUB_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = signingValue("keyAlias", "LINKHUB_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = signingValue("keyPassword", "LINKHUB_RELEASE_KEY_PASSWORD")
+val hasReleaseSigning = releaseStoreFile != null && releaseStorePassword != null &&
+    releaseKeyAlias != null && releaseKeyPassword != null
 
 android {
     namespace = "com.linkhub.app"
@@ -13,6 +36,36 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1.0"
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            } else {
+                logger.warn(
+                    "LinkHub: no release signing configured (keystore.properties / " +
+                        "LINKHUB_RELEASE_* env vars missing); release build will be unsigned."
+                )
+            }
+        }
     }
 
     buildFeatures {
