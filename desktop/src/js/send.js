@@ -1,6 +1,7 @@
 // ── Send Tab ────────────────────────────────────────────────────────
 
 let cachedPeers = [];
+let pendingSendSelection = null;
 // Tracks the last address auto-filled per kind, so background discovery can
 // refresh it without clobbering a value the user typed manually.
 let lastAutoAddr = { text: '', file: '' };
@@ -81,9 +82,34 @@ async function renderSendTab() {
 
     document.getElementById('send-device-select').innerHTML = opts;
     document.getElementById('send-file-device-select').innerHTML = opts;
+    applyPendingSendSelection();
   } catch (err) {
     showMessage('send-msg', 'Failed to load devices: ' + err.message, 'error');
   }
+}
+
+function selectPeerForSend(peerDeviceId, kind = 'text') {
+  pendingSendSelection = { peerDeviceId, kind };
+  document.querySelectorAll('.tab-bar .tab').forEach(btn => {
+    const active = btn.dataset.tab === 'send';
+    btn.classList.toggle('active', active);
+  });
+  document.querySelectorAll('.tab-content').forEach(section => {
+    section.classList.toggle('active', section.id === 'tab-send');
+  });
+  renderSendTab();
+}
+
+function applyPendingSendSelection() {
+  if (!pendingSendSelection) return;
+  const { peerDeviceId, kind } = pendingSendSelection;
+  const selectId = kind === 'file' ? 'send-file-device-select' : 'send-device-select';
+  const selectEl = document.getElementById(selectId);
+  if (!selectEl) return;
+  selectEl.value = peerDeviceId;
+  onSendPeerChanged(kind);
+  pendingSendSelection = null;
+  setStatus('Selected target device for sending', 'ok');
 }
 
 function onSendPeerChanged(kind) {

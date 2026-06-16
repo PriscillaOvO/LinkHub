@@ -162,13 +162,32 @@ main {
 .device-item {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
 }
 .device-item:last-child { border-bottom: none; }
+.device-main { width: 100%; min-width: 0; }
+.device-title-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+}
 .device-item .device-name { font-weight: 600; }
 .device-item .device-meta { font-size: 0.75rem; color: var(--text-secondary); }
+.device-item code { word-break: break-all; }
+.device-state { flex: 0 0 auto; }
+.device-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.btn-small {
+  padding: 6px 10px;
+  font-size: 0.75rem;
+}
 
 /* ── Status / messages ──────────────── */
 .msg { padding: 10px 14px; border-radius: var(--radius); font-size: 0.85rem; margin-top: 10px; }

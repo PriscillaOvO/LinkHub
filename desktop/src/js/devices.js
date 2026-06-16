@@ -58,19 +58,7 @@ async function renderDevicesTab() {
       document.getElementById('trusted-list').innerHTML =
         '<p class="device-meta">No trusted devices yet. Go to Pair tab to add one.</p>';
     } else {
-      const items = result.trusted_devices.map(d => {
-        const online = peerPresence(d.device_id).online;
-        return `
-        <li class="device-item">
-          <div>
-            <div class="device-name">${escHtml(d.device_name)}</div>
-            <div class="device-meta">${escHtml(d.device_id)} &middot; ${escHtml(d.fingerprint)}</div>
-            <div class="device-meta">${escHtml(presenceLabel(d.device_id))}</div>
-          </div>
-          <span title="${online ? '在线' : '离线'}">${online ? '&#128994;' : '&#9898;'}</span>
-        </li>
-      `;
-      }).join('');
+      const items = result.trusted_devices.map(d => deviceListItem(d)).join('');
       document.getElementById('trusted-list').innerHTML =
         `<ul class="device-list">${items}</ul>`;
     }
@@ -78,6 +66,34 @@ async function renderDevicesTab() {
   } catch (err) {
     showMessage('devices-msg', 'Error: ' + err.message, 'error');
   }
+}
+
+function deviceListItem(device) {
+  const presence = peerPresence(device.device_id);
+  const address = presence.address || '地址未知';
+  const statusDot = presence.online ? '&#128994;' : '&#9898;';
+  const statusTitle = presence.online ? '在线' : '离线';
+  return `
+        <li class="device-item">
+          <div class="device-main">
+            <div class="device-title-row">
+              <span class="device-name">${escHtml(device.device_name)}</span>
+              <span class="device-state" title="${statusTitle}">${statusDot}</span>
+            </div>
+            <div class="device-meta">ID: <code>${escHtml(device.device_id)}</code></div>
+            <div class="device-meta">Fingerprint: <code>${escHtml(device.fingerprint)}</code></div>
+            <div class="device-meta">Address: <code>${escHtml(address)}</code></div>
+            <div class="device-meta">${escHtml(presenceLabel(device.device_id))}</div>
+            <div class="device-actions">
+              <button class="btn btn-secondary btn-small" onclick="copyDeviceField('${escJs(device.device_id)}', 'Device ID')">Copy ID</button>
+              <button class="btn btn-secondary btn-small" onclick="copyDeviceAddress('${escJs(device.device_id)}')">Copy Address</button>
+              <button class="btn btn-secondary btn-small" onclick="scanSingleDevice('${escJs(device.device_id)}')">Refresh</button>
+              <button class="btn btn-primary btn-small" onclick="selectPeerForSend('${escJs(device.device_id)}', 'text')">Send Text</button>
+              <button class="btn btn-secondary btn-small" onclick="selectPeerForSend('${escJs(device.device_id)}', 'file')">Send File</button>
+            </div>
+          </div>
+        </li>
+      `;
 }
 
 async function scanTrustedMdns() {
@@ -94,7 +110,11 @@ async function scanTrustedMdns() {
       timeoutSeconds: 4
     });
 
-    peers.forEach(peer => setPeerAddress(peer.device_id, peer.address));
+    const now = Date.now();
+    peers.forEach(peer => {
+      setPeerAddress(peer.device_id, peer.address);
+      setPeerLastSeen(peer.device_id, now);
+    });
 
     if (peers.length === 0) {
       showMessage('devices-msg', 'No trusted LinkHub devices found on LAN.', 'info');
@@ -108,10 +128,77 @@ async function scanTrustedMdns() {
   }
 }
 
+async function scanSingleDevice(deviceId) {
+  const trustStorePath = getSetting('trustStorePath');
+  if (!trustStorePath) {
+    showMessage('devices-msg', 'Trust store path is not configured.', 'error');
+    return;
+  }
+
+  setStatus('Scanning LAN for selected device...', 'info');
+  try {
+    const peers = await tauriInvoke('scan_trusted_mdns', {
+      trustStorePath,
+      timeoutSeconds: 4
+    });
+    const now = Date.now();
+    peers.forEach(peer => {
+      setPeerAddress(peer.device_id, peer.address);
+      setPeerLastSeen(peer.device_id, now);
+    });
+    const found = peers.find(peer => peer.device_id === deviceId);
+    if (!found) {
+      showMessage('devices-msg', 'Selected device was not found on LAN.', 'info');
+      await renderDevicesTab();
+      return;
+    }
+    showMessage('devices-msg', `Updated ${found.device_name}: ${found.address}`, 'success');
+    setStatus('Device address updated', 'ok');
+    await renderDevicesTab();
+  } catch (err) {
+    showMessage('devices-msg', 'LAN scan error: ' + err.message, 'error');
+    setStatus('LAN scan failed', 'error');
+  }
+}
+
+async function copyDeviceField(text, label) {
+  await copyText(text);
+  showMessage('devices-msg', `${label} copied`, 'success');
+}
+
+async function copyDeviceAddress(deviceId) {
+  const address = getPeerAddress(deviceId);
+  if (!address) {
+    showMessage('devices-msg', 'No cached address for this device.', 'info');
+    return;
+  }
+  await copyText(address);
+  showMessage('devices-msg', 'Address copied', 'success');
+}
+
+async function copyText(text) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const input = document.createElement('textarea');
+  input.value = text;
+  input.style.position = 'fixed';
+  input.style.opacity = '0';
+  document.body.appendChild(input);
+  input.select();
+  document.execCommand('copy');
+  input.remove();
+}
+
 function escHtml(s) {
   const div = document.createElement('div');
   div.textContent = s;
   return div.innerHTML;
+}
+
+function escJs(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
 }
 
 // Init on load
