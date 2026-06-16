@@ -9,6 +9,7 @@ android/local.properties
 android/.idea/
 desktop/src-tauri/target/
 desktop/src-tauri/gen/schemas/
+android/app/src/main/jniLibs/**/*.so
 *.apk
 *.log
 .DS_Store
