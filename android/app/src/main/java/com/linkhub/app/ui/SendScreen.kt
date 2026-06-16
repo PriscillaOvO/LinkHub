@@ -35,6 +35,7 @@ import com.google.gson.Gson
 import com.linkhub.app.bridge.RustBridge
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -59,6 +60,7 @@ fun SendScreen() {
     var statusMsg by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     var loaded by remember { mutableStateOf(false) }
+    var lastAutoAddr by remember { mutableStateOf("") }
     val gson = remember { Gson() }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
@@ -82,6 +84,32 @@ fun SendScreen() {
         loaded = true
     }
 
+    // Background auto-discovery: keep the selected device's LAN address
+    // current without the user pressing 扫描并填入地址 (manual edits preserved).
+    LaunchedEffect(Unit) {
+        while (true) {
+            try {
+                val found = scanTrustedMdnsPeers(ctx)
+                if (found.isNotEmpty()) {
+                    found.forEach { updatePeerAddress(ctx, it.deviceId, it.address) }
+                    peers = loadTrustedPeers(ctx)
+                    val sel = selectedPeer
+                    if (sel != null) {
+                        val refreshed = peers.firstOrNull { it.deviceId == sel.deviceId }
+                        if (refreshed != null) selectedPeer = refreshed
+                        val latest = refreshed?.address ?: ""
+                        if (latest.isNotBlank() && (peerAddr.isBlank() || peerAddr == lastAutoAddr)) {
+                            peerAddr = latest
+                            lastAutoAddr = latest
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+            }
+            delay(10_000)
+        }
+    }
+
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -102,6 +130,7 @@ fun SendScreen() {
                             onClick = {
                                 selectedPeer = peer
                                 peerAddr = peer.address.ifEmpty { peerAddr.ifEmpty { "192.168.1.100:8787" } }
+                                lastAutoAddr = peerAddr
                                 statusMsg = "已选择: ${peer.deviceName}"
                             },
                             label = { Text(peer.deviceName) }

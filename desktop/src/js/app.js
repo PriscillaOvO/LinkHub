@@ -71,3 +71,68 @@ function showMessage(containerId, text, type) {
   container.appendChild(div);
   setTimeout(() => div.remove(), 6000);
 }
+
+// ── Auto-discovery (background mDNS refresh) ────────────────────────
+// Periodically resolves trusted devices' LAN addresses so the Devices and
+// Send tabs stay current without the user pressing "Scan LAN". Reuses the
+// existing scan_trusted_mdns command + setPeerAddress storage.
+
+const DISCOVERY_INTERVAL_MS = 8000;
+const PEER_OFFLINE_AFTER_MS = 24000; // ~3 missed cycles -> offline
+
+function setPeerLastSeen(deviceId, ts) {
+  if (!deviceId) return;
+  localStorage.setItem('linkhub_peer_seen_' + deviceId, String(ts));
+}
+function getPeerLastSeen(deviceId) {
+  const v = localStorage.getItem('linkhub_peer_seen_' + deviceId);
+  return v ? parseInt(v, 10) : 0;
+}
+
+// Returns { address, online, ageMs } for a trusted device.
+function peerPresence(deviceId) {
+  const address = getPeerAddress(deviceId);
+  const seen = getPeerLastSeen(deviceId);
+  const ageMs = seen ? Date.now() - seen : Infinity;
+  return { address, online: !!address && ageMs <= PEER_OFFLINE_AFTER_MS, ageMs };
+}
+
+function presenceLabel(deviceId) {
+  const p = peerPresence(deviceId);
+  if (!p.address) return '离线 · 地址未知';
+  if (!p.online) return `离线 · 上次 ${p.address}`;
+  const secs = Math.max(0, Math.round(p.ageMs / 1000));
+  const ago = secs <= 1 ? '刚刚' : `${secs} 秒前`;
+  return `在线 · ${p.address} · ${ago}`;
+}
+
+let autoDiscoveryTimer = null;
+
+async function runAutoDiscoveryOnce() {
+  const trustStorePath = getSetting('trustStorePath');
+  if (!trustStorePath) return;
+  let peers;
+  try {
+    peers = await tauriInvoke('scan_trusted_mdns', { trustStorePath, timeoutSeconds: 3 });
+  } catch (_) {
+    return; // stay silent; the manual Scan LAN button surfaces errors
+  }
+  const now = Date.now();
+  peers.forEach(peer => {
+    setPeerAddress(peer.device_id, peer.address);
+    setPeerLastSeen(peer.device_id, now);
+  });
+
+  const devicesActive = document.getElementById('tab-devices')?.classList.contains('active');
+  const sendActive = document.getElementById('tab-send')?.classList.contains('active');
+  if (devicesActive && typeof refreshDevicePresence === 'function') refreshDevicePresence();
+  if (sendActive && typeof autoFillSelectedAddresses === 'function') autoFillSelectedAddresses();
+}
+
+function startAutoDiscovery() {
+  if (autoDiscoveryTimer) return;
+  runAutoDiscoveryOnce();
+  autoDiscoveryTimer = setInterval(runAutoDiscoveryOnce, DISCOVERY_INTERVAL_MS);
+}
+
+window.addEventListener('DOMContentLoaded', startAutoDiscovery);

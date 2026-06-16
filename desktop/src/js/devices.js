@@ -19,8 +19,14 @@ function buildDevicesTab() {
       <button class="btn btn-primary" onclick="renderDevicesTab()">Load Status</button>
       <button class="btn btn-secondary" onclick="scanTrustedMdns()">Scan LAN</button>
     </div>
+    <p class="device-meta">局域网地址每数秒自动发现刷新，无需手动扫描。</p>
     <div id="devices-msg"></div>
   `;
+}
+
+// Called by the background auto-discovery loop to keep presence current.
+function refreshDevicePresence() {
+  if (document.getElementById('local-status')) renderDevicesTab();
 }
 
 async function renderDevicesTab() {
@@ -52,16 +58,19 @@ async function renderDevicesTab() {
       document.getElementById('trusted-list').innerHTML =
         '<p class="device-meta">No trusted devices yet. Go to Pair tab to add one.</p>';
     } else {
-      const items = result.trusted_devices.map(d => `
+      const items = result.trusted_devices.map(d => {
+        const online = peerPresence(d.device_id).online;
+        return `
         <li class="device-item">
           <div>
             <div class="device-name">${escHtml(d.device_name)}</div>
             <div class="device-meta">${escHtml(d.device_id)} &middot; ${escHtml(d.fingerprint)}</div>
-            <div class="device-meta">Address: ${escHtml(getPeerAddress(d.device_id) || 'not saved')}</div>
+            <div class="device-meta">${escHtml(presenceLabel(d.device_id))}</div>
           </div>
-          <span>&#9786;</span>
+          <span title="${online ? '在线' : '离线'}">${online ? '&#128994;' : '&#9898;'}</span>
         </li>
-      `).join('');
+      `;
+      }).join('');
       document.getElementById('trusted-list').innerHTML =
         `<ul class="device-list">${items}</ul>`;
     }

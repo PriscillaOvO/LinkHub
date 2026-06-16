@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 data class DeviceEntry(
@@ -33,6 +34,22 @@ data class DeviceEntry(
     val fingerprint: String = "",
     val dhPublicKey: String = ""
 )
+
+private const val DEVICE_OFFLINE_AFTER_MS = 24_000L
+
+fun isDeviceOnline(lastSeen: Long?, nowMs: Long): Boolean {
+    return lastSeen != null && nowMs - lastSeen <= DEVICE_OFFLINE_AFTER_MS
+}
+
+fun devicePresenceLabel(address: String, lastSeen: Long?, nowMs: Long): String {
+    if (isDeviceOnline(lastSeen, nowMs) && address.isNotBlank()) {
+        val secs = ((nowMs - (lastSeen ?: nowMs)) / 1000).coerceAtLeast(0)
+        val ago = if (secs <= 1) "刚刚" else "${secs}秒前"
+        return "在线 · $address · $ago"
+    }
+    if (address.isNotBlank()) return "离线 · 上次 $address"
+    return "离线 · 地址未知"
+}
 
 @Composable
 fun DevicesScreen() {
@@ -43,6 +60,8 @@ fun DevicesScreen() {
     var scanning by remember { mutableStateOf(false) }
     var statusMsg by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
+    var presence by remember { mutableStateOf<Map<String, Long>>(emptyMap()) }
+    var refreshTick by remember { mutableStateOf(0L) }
 
     LaunchedEffect(Unit) {
         try {
@@ -52,6 +71,27 @@ fun DevicesScreen() {
         }
         loaded = true
     }
+
+    // Background auto-discovery: keep trusted devices' LAN addresses fresh
+    // while this screen is visible, without the user pressing 扫描局域网.
+    LaunchedEffect(Unit) {
+        while (true) {
+            try {
+                val found = scanTrustedMdnsPeers(ctx)
+                if (found.isNotEmpty()) {
+                    found.forEach { updatePeerAddress(ctx, it.deviceId, it.address) }
+                    val now = System.currentTimeMillis()
+                    presence = presence + found.associate { it.deviceId to now }
+                    trustedDevices = loadTrustedPeers(ctx)
+                }
+            } catch (_: Exception) {
+            }
+            refreshTick = System.currentTimeMillis()
+            delay(10_000)
+        }
+    }
+
+    val nowMs = if (refreshTick > 0L) refreshTick else System.currentTimeMillis()
 
     Column(
         modifier = Modifier.fillMaxSize().padding(16.dp),
@@ -155,9 +195,13 @@ fun DevicesScreen() {
                                     style = MaterialTheme.typography.bodySmall
                                 )
                             }
-                            if (device.address.isNotBlank()) {
-                                Text("地址: ${device.address}", style = MaterialTheme.typography.bodySmall)
-                            }
+                            val online = isDeviceOnline(presence[device.deviceId], nowMs)
+                            Text(
+                                devicePresenceLabel(device.address, presence[device.deviceId], nowMs),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (online) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 }

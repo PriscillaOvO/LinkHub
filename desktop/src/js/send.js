@@ -1,6 +1,9 @@
 // ── Send Tab ────────────────────────────────────────────────────────
 
 let cachedPeers = [];
+// Tracks the last address auto-filled per kind, so background discovery can
+// refresh it without clobbering a value the user typed manually.
+let lastAutoAddr = { text: '', file: '' };
 
 function buildSendTab() {
   const section = document.getElementById('tab-send');
@@ -90,8 +93,30 @@ function onSendPeerChanged(kind) {
   const savedAddr = getPeerAddress(peerDeviceId);
   if (savedAddr) {
     document.getElementById(addrId).value = savedAddr;
+    lastAutoAddr[kind] = savedAddr;
     setStatus('Loaded saved address for selected device', 'ok');
   }
+}
+
+// Called by the background auto-discovery loop: refresh the selected device's
+// address input when a newer LAN address is found, unless the user edited it.
+function autoFillSelectedAddresses() {
+  ['text', 'file'].forEach(kind => {
+    const selectId = kind === 'file' ? 'send-file-device-select' : 'send-device-select';
+    const addrId = kind === 'file' ? 'send-file-addr' : 'send-addr';
+    const selectEl = document.getElementById(selectId);
+    const addrEl = document.getElementById(addrId);
+    if (!selectEl || !addrEl) return;
+    const peerId = selectEl.value;
+    if (!peerId) return;
+    const latest = getPeerAddress(peerId);
+    if (!latest) return;
+    const current = addrEl.value.trim();
+    if (current === '' || current === lastAutoAddr[kind]) {
+      addrEl.value = latest;
+      lastAutoAddr[kind] = latest;
+    }
+  });
 }
 
 async function chooseFileForSend() {
