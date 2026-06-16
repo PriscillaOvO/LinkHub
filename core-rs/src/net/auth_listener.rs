@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use crate::{LocalIdentity, TrustStore};
 
-use super::{run_authenticated_session, RECEIVED_DIR};
+use super::auth_session::run_authenticated_session;
+use super::RECEIVED_DIR;
 
 pub fn run_authenticated_text_listener(
     bind_addr: &str,

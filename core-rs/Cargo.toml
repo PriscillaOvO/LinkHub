@@ -24,6 +24,9 @@ snow = "0.9.6"
 uuid = { version = "1", features = ["v4"] }
 x25519-dalek = { version = "2.0.1", features = ["static_secrets", "getrandom"] }
 
+[dev-dependencies]
+sha2 = "0.10.8"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.60.2", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
