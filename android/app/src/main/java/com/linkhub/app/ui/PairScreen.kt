@@ -1,9 +1,19 @@
 package com.linkhub.app.ui
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -15,13 +25,21 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
 import com.google.gson.Gson
 import com.google.gson.annotations.SerializedName
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.common.InputImage
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import com.linkhub.app.bridge.RustBridge
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 data class IdentityJson(
     @SerializedName("device_id") val deviceId: String = "",
@@ -85,6 +103,24 @@ fun PairScreen() {
     var confirmationInput by remember { mutableStateOf("") }
     var statusMsg by remember { mutableStateOf("") }
     var pairResult by remember { mutableStateOf<PairResultJson?>(null) }
+    var scannerOpen by remember { mutableStateOf(false) }
+    var cameraGranted by remember {
+        mutableStateOf(ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
+    }
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        cameraGranted = granted
+        scannerOpen = granted
+        statusMsg = if (granted) "相机已授权，请扫描对方二维码" else "未授予相机权限，可继续手动粘贴配对码"
+    }
+
+    fun inspectPeerPayload(payload: String) {
+        if (identity == null || payload.isBlank()) return
+        val json = RustBridge.parsePairingPayload(gson.toJson(identity), payload)
+        peerInfo = try { gson.fromJson(json, PeerInfoJson::class.java) } catch (_: Exception) { null }
+        confirmationInput = ""
+        pairResult = null
+        statusMsg = if (peerInfo != null) "确认码: ${peerInfo!!.confirmationCode}" else "解析失败"
+    }
 
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
@@ -138,15 +174,41 @@ fun PairScreen() {
         Divider()
 
         Text("扫描对方", style = MaterialTheme.typography.titleMedium)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            Button(
+                onClick = {
+                    if (cameraGranted) {
+                        scannerOpen = true
+                        statusMsg = "请扫描对方的 LinkHub 配对二维码"
+                    } else {
+                        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                    }
+                },
+                enabled = identity != null
+            ) {
+                Text("扫码导入配对码")
+            }
+            if (scannerOpen) {
+                TextButton(onClick = { scannerOpen = false }) {
+                    Text("关闭扫码")
+                }
+            }
+        }
+        if (scannerOpen) {
+            PairingPayloadScanner(
+                onPayload = { payload ->
+                    peerPayload = payload
+                    scannerOpen = false
+                    inspectPeerPayload(payload)
+                },
+                onInvalid = { statusMsg = "不是 LinkHub 配对码，请继续扫描" },
+                onError = { statusMsg = "扫码失败: $it" }
+            )
+        }
         OutlinedTextField(value = peerPayload, onValueChange = { peerPayload = it },
             label = { Text("粘贴对方的配对码") }, modifier = Modifier.fillMaxWidth(), maxLines = 2)
         Button(onClick = {
-            if (identity != null && peerPayload.isNotEmpty()) {
-                val json = RustBridge.parsePairingPayload(gson.toJson(identity), peerPayload)
-                peerInfo = try { gson.fromJson(json, PeerInfoJson::class.java) } catch (_: Exception) { null }
-                confirmationInput = ""
-                statusMsg = if (peerInfo != null) "确认码: ${peerInfo!!.confirmationCode}" else "解析失败"
-            }
+            inspectPeerPayload(peerPayload)
         }, enabled = identity != null && peerPayload.isNotEmpty()) { Text("查看对方信息") }
 
         if (peerInfo != null) {
@@ -193,6 +255,118 @@ fun PairScreen() {
             Text(statusMsg, color = MaterialTheme.colorScheme.primary)
         }
     }
+}
+
+@Composable
+fun PairingPayloadScanner(
+    onPayload: (String) -> Unit,
+    onInvalid: () -> Unit,
+    onError: (String) -> Unit
+) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val executor = remember { Executors.newSingleThreadExecutor() }
+    val handled = remember { AtomicBoolean(false) }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            handled.set(true)
+            executor.shutdown()
+        }
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+            Text("扫描 LinkHub 配对二维码", style = MaterialTheme.typography.titleSmall)
+            Spacer(modifier = Modifier.height(8.dp))
+            AndroidView(
+                modifier = Modifier.fillMaxWidth().height(280.dp),
+                factory = { context ->
+                    val previewView = PreviewView(context).apply {
+                        scaleType = PreviewView.ScaleType.FILL_CENTER
+                    }
+                    val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+                    cameraProviderFuture.addListener({
+                        try {
+                            val cameraProvider = cameraProviderFuture.get()
+                            val preview = Preview.Builder().build().also {
+                                it.setSurfaceProvider(previewView.surfaceProvider)
+                            }
+                            val analysis = ImageAnalysis.Builder()
+                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                .build()
+                                .also {
+                                    it.setAnalyzer(executor) { imageProxy ->
+                                        analyzePairingQr(imageProxy, handled, { payload ->
+                                            if (handled.compareAndSet(false, true)) {
+                                                onPayload(payload)
+                                            }
+                                        }, {
+                                            if (!handled.get()) onInvalid()
+                                        }, { error ->
+                                            if (!handled.get()) onError(error)
+                                        })
+                                    }
+                                }
+                            cameraProvider.unbindAll()
+                            cameraProvider.bindToLifecycle(
+                                lifecycleOwner,
+                                CameraSelector.DEFAULT_BACK_CAMERA,
+                                preview,
+                                analysis
+                            )
+                        } catch (e: Exception) {
+                            onError(e.message ?: e::class.java.simpleName)
+                        }
+                    }, ContextCompat.getMainExecutor(context))
+                    previewView
+                }
+            )
+            Text(
+                "将对方配对二维码放入框内；识别成功后会自动填入并显示确认码。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+private fun analyzePairingQr(
+    imageProxy: ImageProxy,
+    handled: AtomicBoolean,
+    onPayload: (String) -> Unit,
+    onInvalid: () -> Unit,
+    onError: (String) -> Unit
+) {
+    if (handled.get()) {
+        imageProxy.close()
+        return
+    }
+    val mediaImage = imageProxy.image
+    if (mediaImage == null) {
+        imageProxy.close()
+        return
+    }
+    val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+    BarcodeScanning.getClient()
+        .process(image)
+        .addOnSuccessListener { barcodes ->
+            val payload = barcodes
+                .asSequence()
+                .filter { it.format == Barcode.FORMAT_QR_CODE || it.rawValue != null }
+                .mapNotNull { it.rawValue?.trim() }
+                .firstOrNull { it.startsWith("linkhub-pair-v1|") || it.startsWith("linkhub-pair|") }
+            if (payload != null) {
+                onPayload(payload)
+            } else if (barcodes.any { !it.rawValue.isNullOrBlank() }) {
+                onInvalid()
+            }
+        }
+        .addOnFailureListener { e ->
+            onError(e.message ?: e::class.java.simpleName)
+        }
+        .addOnCompleteListener {
+            imageProxy.close()
+        }
 }
 
 @Composable
