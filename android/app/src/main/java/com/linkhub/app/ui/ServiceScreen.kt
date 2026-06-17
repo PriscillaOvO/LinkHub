@@ -31,7 +31,14 @@ import kotlinx.coroutines.delay
 fun ServiceScreen() {
     val ctx = LocalContext.current
     var serviceStatus by remember { mutableStateOf(loadServiceStatus(ctx)) }
-    var isRunning by remember { mutableStateOf(serviceStatus.running || LinkHubService.isRunning) }
+    // The persisted serviceStatus.running survives process death, so after the
+    // app process is killed (reinstall, swipe-away, OS restart) it can still read
+    // `running = true` from a previous session even though no service/listener is
+    // actually alive. Trusting it would leave the UI showing "运行中" and disable
+    // 启动监听 forever — a dead-lock where the listener can never be (re)bound.
+    // LinkHubService.isRunning is a process-scoped static that is correctly false
+    // in a fresh process, so use it as the single source of truth for liveness.
+    var isRunning by remember { mutableStateOf(LinkHubService.isRunning) }
     var listenAddr by remember { mutableStateOf("0.0.0.0:8787") }
     var receiveDir by remember { mutableStateOf(defaultReceiveDir(ctx)) }
     var statusMsg by remember { mutableStateOf(serviceStatus.error.ifBlank { serviceStatus.detail }) }
@@ -41,7 +48,7 @@ fun ServiceScreen() {
     LaunchedEffect(Unit) {
         while (true) {
             serviceStatus = loadServiceStatus(ctx)
-            isRunning = serviceStatus.running || LinkHubService.isRunning
+            isRunning = LinkHubService.isRunning
             if (serviceStatus.listenAddr.isNotBlank()) listenAddr = serviceStatus.listenAddr
             if (serviceStatus.receiveDir.isNotBlank()) receiveDir = serviceStatus.receiveDir
             statusMsg = serviceStatus.error.ifBlank { serviceStatus.detail }

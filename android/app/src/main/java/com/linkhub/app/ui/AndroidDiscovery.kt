@@ -9,7 +9,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.util.Collections
-import java.util.concurrent.Executors
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 private const val LINKHUB_SERVICE_TYPE = "_linkhub._tcp."
 
@@ -90,7 +92,17 @@ suspend fun scanTrustedMdnsPeers(
     val manager = appCtx.getSystemService(Context.NSD_SERVICE) as NsdManager
     val lock = acquireMulticastLock(appCtx, "linkhub-mdns-scan")
     val discovered = Collections.synchronizedList(mutableListOf<DiscoveredPeerAddress>())
-    val executor = Executors.newSingleThreadExecutor()
+    // NsdManager.registerServiceInfoCallback keeps posting to this executor on its
+    // own ServiceHandler thread until the async unregister is confirmed — which can
+    // arrive after we tear the scan down. A plain Executors.newSingleThreadExecutor()
+    // uses AbortPolicy, so those late tasks throw RejectedExecutionException on a
+    // framework thread and crash the whole app. DiscardPolicy silently drops any task
+    // submitted after shutdown, making teardown race-safe.
+    val executor = ThreadPoolExecutor(
+        1, 1, 0L, TimeUnit.MILLISECONDS,
+        LinkedBlockingQueue(),
+        ThreadPoolExecutor.DiscardPolicy()
+    )
     val serviceInfoCallbacks = Collections.synchronizedList(mutableListOf<NsdManager.ServiceInfoCallback>())
 
     val discoveryListener = object : NsdManager.DiscoveryListener {

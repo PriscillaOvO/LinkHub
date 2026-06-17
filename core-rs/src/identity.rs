@@ -133,13 +133,17 @@ mod tests {
         let phone = identity("phone-001", "Android Phone", "phone-public-key");
         let windows = identity("windows-001", "Windows PC", "windows-public-key");
 
+        // Mirror the real two-way flow: each device generated its own payload
+        // with its OWN nonce, and builds a session from the PEER's invitation.
+        // The confirmation code must still match across devices even though the
+        // two nonces differ.
         let phone_session = PairingSession::new(
             phone.clone(),
-            PairingInvitation::new(windows.clone(), "pairing-nonce-001", now, ttl),
+            PairingInvitation::new(windows.clone(), "nonce-from-windows", now, ttl),
         );
         let windows_session = PairingSession::new(
             windows,
-            PairingInvitation::new(phone, "pairing-nonce-001", now, ttl),
+            PairingInvitation::new(phone, "nonce-from-phone", now, ttl),
         );
 
         assert_eq!(

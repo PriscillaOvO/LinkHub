@@ -153,11 +153,7 @@ impl PairingSession {
     }
 
     pub fn confirmation_code(&self) -> String {
-        confirmation_code(
-            &self.local_identity,
-            self.invitation.identity(),
-            self.invitation.nonce(),
-        )
+        confirmation_code(&self.local_identity, self.invitation.identity())
     }
 
     pub fn confirm(
@@ -245,12 +241,20 @@ impl fmt::Display for PairingError {
 
 impl std::error::Error for PairingError {}
 
-fn confirmation_code(local: &DeviceIdentity, peer: &DeviceIdentity, nonce: &str) -> String {
+/// Derives the short confirmation code (SAS) shown to the user during pairing.
+///
+/// It depends ONLY on the two device fingerprints, sorted so both peers compute
+/// the same value regardless of direction. It deliberately does NOT mix in the
+/// invitation nonce: in the app's two-way flow each device generates its own
+/// payload (its own nonce) and inspects the peer's, so a session only ever holds
+/// the peer's nonce — including it made the two devices show different codes,
+/// defeating the cross-device comparison the code exists for. MITM protection
+/// comes from binding both fingerprints (i.e. both public keys), like a stable
+/// safety number; the nonce added no protection here.
+fn confirmation_code(local: &DeviceIdentity, peer: &DeviceIdentity) -> String {
     let mut fingerprints = [local.fingerprint(), peer.fingerprint()];
     fingerprints.sort();
-    let digest = sha256_hex(
-        format!("{}\0{}\0{}", fingerprints[0], fingerprints[1], nonce.trim()).as_bytes(),
-    );
+    let digest = sha256_hex(format!("{}\0{}", fingerprints[0], fingerprints[1]).as_bytes());
 
     grouped_uppercase(&digest[..6], 3)
 }

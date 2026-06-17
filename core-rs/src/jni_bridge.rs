@@ -437,17 +437,34 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_startListener(
         let my_epoch = LISTENER_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
         LISTENER_RUNNING.store(true, Ordering::SeqCst);
         let handle = std::thread::spawn(move || {
-            let result = crate::run_authenticated_listener_on_with_callback(
-                listener,
-                &addr,
-                local,
-                trust_store,
-                &dir,
-                || !LISTENER_RUNNING.load(Ordering::Relaxed),
-                Some(on_file_received),
-            );
-            if let Err(err) = result {
-                set_listener_last_error(Some(format!("{err}")));
+            // Catch panics so a crash in the worker can never leave
+            // LISTENER_RUNNING stuck at `true` with no bound socket (which makes
+            // the UI claim "running" while nothing actually listens). On Android
+            // there is no panic hook wired up, so without this the panic message
+            // is lost entirely; surfacing it through last_error makes it visible
+            // via listenerStatus.
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                crate::run_authenticated_listener_on_with_callback(
+                    listener,
+                    &addr,
+                    local,
+                    trust_store,
+                    &dir,
+                    || !LISTENER_RUNNING.load(Ordering::Relaxed),
+                    Some(on_file_received),
+                )
+            }));
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => set_listener_last_error(Some(format!("{err}"))),
+                Err(panic) => {
+                    let msg = panic
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "listener thread panicked".to_string());
+                    set_listener_last_error(Some(format!("listener panicked: {msg}")));
+                }
             }
             if LISTENER_EPOCH.load(Ordering::SeqCst) == my_epoch {
                 LISTENER_RUNNING.store(false, Ordering::SeqCst);

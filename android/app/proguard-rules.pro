@@ -40,6 +40,16 @@
     @com.google.gson.annotations.SerializedName <fields>;
 }
 
+# R8 full mode (default on AGP 8+) strips the generic type argument from
+# anonymous TypeToken subclasses (e.g. `object : TypeToken<List<TrustedPeer>>(){}`),
+# so gson.fromJson resolves the element type as Object and the deserialized list
+# comes back empty. This silently broke trusted-peer loading in release builds
+# (pairing reported success but the device list / Send targets stayed empty,
+# while non-generic identity deserialization kept working). Keep TypeToken and
+# its anonymous subclasses so the generic signature survives.
+-keep class com.google.gson.reflect.TypeToken { *; }
+-keep class * extends com.google.gson.reflect.TypeToken
+
 # --- General ------------------------------------------------------------
 # Preserve line numbers for readable release stack traces.
 -keepattributes SourceFile, LineNumberTable
