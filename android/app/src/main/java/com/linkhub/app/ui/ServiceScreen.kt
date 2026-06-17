@@ -30,7 +30,9 @@ import kotlinx.coroutines.delay
 @Composable
 fun ServiceScreen() {
     val ctx = LocalContext.current
-    var serviceStatus by remember { mutableStateOf(loadServiceStatus(ctx)) }
+    var serviceStatus by remember {
+        mutableStateOf(reconcileServiceStatus(ctx, LinkHubService.isRunning))
+    }
     // The persisted serviceStatus.running survives process death, so after the
     // app process is killed (reinstall, swipe-away, OS restart) it can still read
     // `running = true` from a previous session even though no service/listener is
@@ -47,8 +49,8 @@ fun ServiceScreen() {
 
     LaunchedEffect(Unit) {
         while (true) {
-            serviceStatus = loadServiceStatus(ctx)
             isRunning = LinkHubService.isRunning
+            serviceStatus = reconcileServiceStatus(ctx, isRunning)
             if (serviceStatus.listenAddr.isNotBlank()) listenAddr = serviceStatus.listenAddr
             if (serviceStatus.receiveDir.isNotBlank()) receiveDir = serviceStatus.receiveDir
             statusMsg = serviceStatus.error.ifBlank { serviceStatus.detail }

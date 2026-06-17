@@ -23,6 +23,11 @@ import com.linkhub.app.ui.stopAndroidMdnsAdvertise
 
 class LinkHubService : Service() {
     companion object {
+        // Written on the service/monitor threads (onStartCommand, onDestroy, the
+        // listener-monitor daemon) and read on the Compose UI thread as the sole
+        // liveness signal — must be @Volatile so the UI never observes a stale
+        // value (a stale read could re-disable 启动监听 with nothing listening).
+        @Volatile
         var isRunning = false
             private set
     }

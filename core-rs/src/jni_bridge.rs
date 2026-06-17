@@ -9,13 +9,13 @@ use jni::sys::jstring;
 use jni::{JNIEnv, JavaVM};
 
 use crate::{
-    new_pairing_nonce, FileReceivedCallback, LocalIdentity, PairingInvitation, PairingSession,
-    ReceivedFileEvent, TrustStore,
+    FileReceivedCallback, LocalIdentity, PairingInvitation, PairingSession, ReceivedFileEvent,
+    TrustStore,
 };
 use serde::{Deserialize, Serialize};
 use std::net::TcpListener;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 // ── JSON interchange types ─────────────────────────────────────────
 
@@ -154,8 +154,7 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_generatePairingPay
         let local = to_local_identity(&jni)?;
         let invitation = PairingInvitation::new(
             local.identity().clone(),
-            new_pairing_nonce(),
-            Instant::now(),
+            SystemTime::now(),
             Duration::from_secs(ttl_seconds as u64),
         );
         Ok(invitation.to_payload())
@@ -178,7 +177,7 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_parsePairingPayloa
         let payload = get_string(&mut env, &payload);
         let jni: JniIdentity = serde_json::from_str(&json).map_err(|e| format!("{e}"))?;
         let local = to_local_identity(&jni)?;
-        let invitation = PairingInvitation::from_payload(&payload, Instant::now())
+        let invitation = PairingInvitation::from_payload(&payload, SystemTime::now())
             .map_err(|e| format!("{e}"))?;
         let session = PairingSession::new(local.identity().clone(), invitation);
         Ok(ok_json(&JniPeerInfo {
@@ -208,11 +207,11 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_confirmPairing(
         let code = get_string(&mut env, &confirmation_code);
         let jni: JniIdentity = serde_json::from_str(&json).map_err(|e| format!("{e}"))?;
         let local = to_local_identity(&jni)?;
-        let invitation = PairingInvitation::from_payload(&payload, Instant::now())
+        let invitation = PairingInvitation::from_payload(&payload, SystemTime::now())
             .map_err(|e| format!("{e}"))?;
         let session = PairingSession::new(local.identity().clone(), invitation);
         let trusted = session
-            .confirm(&code, Instant::now(), SystemTime::now())
+            .confirm(&code, SystemTime::now(), SystemTime::now())
             .map_err(|e| format!("{e}"))?;
         Ok(ok_json(&JniPairResult {
             device_id: trusted.device_id().to_string(),
@@ -297,10 +296,12 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_sendFile(
 // ── Listener ───────────────────────────────────────────────────────
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, Once};
 use std::thread::JoinHandle;
 static LISTENER_RUNNING: AtomicBool = AtomicBool::new(false);
 static LISTENER_LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
+static LAST_NATIVE_PANIC: Mutex<Option<String>> = Mutex::new(None);
+static PANIC_HOOK: Once = Once::new();
 /// Monotonic generation for each listener run. A listener worker thread only
 /// clears `LISTENER_RUNNING` on exit if it is still the current generation, so
 /// a stale thread shutting down can never clobber a freshly started listener.
@@ -335,11 +336,51 @@ fn set_listener_last_error(error: Option<String>) {
 }
 
 fn listener_last_error() -> String {
-    LISTENER_LAST_ERROR
+    let listener_error = LISTENER_LAST_ERROR
         .lock()
         .ok()
         .and_then(|last_error| last_error.clone())
+        .unwrap_or_default();
+    if !listener_error.is_empty() {
+        return listener_error;
+    }
+
+    LAST_NATIVE_PANIC
+        .lock()
+        .ok()
+        .and_then(|last_panic| last_panic.clone())
         .unwrap_or_default()
+}
+
+fn install_panic_hook() {
+    PANIC_HOOK.call_once(|| {
+        android_logger::init_once(
+            android_logger::Config::default()
+                .with_tag("LinkHubCore")
+                .with_max_level(log::LevelFilter::Error),
+        );
+        std::panic::set_hook(Box::new(|info| {
+            let payload = info
+                .payload()
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "native panic".to_string());
+            let thread = std::thread::current()
+                .name()
+                .unwrap_or("unnamed")
+                .to_string();
+            let location = info
+                .location()
+                .map(|loc| format!("{}:{}", loc.file(), loc.line()))
+                .unwrap_or_else(|| "unknown location".to_string());
+            let message = format!("native panic on thread {thread} at {location}: {payload}");
+            log::error!("{message}");
+            if let Ok(mut last_panic) = LAST_NATIVE_PANIC.lock() {
+                *last_panic = Some(message);
+            }
+        }));
+    });
 }
 
 /// Builds a callback that forwards "file received" events to the static Kotlin
@@ -398,6 +439,7 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_startListener(
     receive_dir: JString,
 ) -> jstring {
     let result = (|| -> Result<String, String> {
+        install_panic_hook();
         if LISTENER_RUNNING.load(Ordering::SeqCst) {
             return Ok(r#"{"running":true,"detail":"listener already running"}"#.into());
         }

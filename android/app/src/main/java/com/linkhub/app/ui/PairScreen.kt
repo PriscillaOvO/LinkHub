@@ -354,7 +354,7 @@ private fun analyzePairingQr(
                 .asSequence()
                 .filter { it.format == Barcode.FORMAT_QR_CODE || it.rawValue != null }
                 .mapNotNull { it.rawValue?.trim() }
-                .firstOrNull { it.startsWith("linkhub-pair-v1|") || it.startsWith("linkhub-pair|") }
+                .firstOrNull { it.startsWith("linkhub-pair-v2|") }
             if (payload != null) {
                 onPayload(payload)
             } else if (barcodes.any { !it.rawValue.isNullOrBlank() }) {

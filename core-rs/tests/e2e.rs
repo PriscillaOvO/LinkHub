@@ -34,7 +34,10 @@ fn unique_dir(tag: &str) -> PathBuf {
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!("linkhub-e2e-{tag}-{nanos}-{:?}", thread::current().id()));
+    let dir = std::env::temp_dir().join(format!(
+        "linkhub-e2e-{tag}-{nanos}-{:?}",
+        thread::current().id()
+    ));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -65,7 +68,11 @@ fn transfer_id(device_id: &str, filename: &str, size: u64, sha256_hex: &str) -> 
 
 /// Replicates `net::file_transfer::received_file_path` / `partial_file_path` /
 /// `receive_metadata_path`.
-fn received_paths(receive_dir: &Path, transfer_id: &str, filename: &str) -> (PathBuf, PathBuf, PathBuf) {
+fn received_paths(
+    receive_dir: &Path,
+    transfer_id: &str,
+    filename: &str,
+) -> (PathBuf, PathBuf, PathBuf) {
     let final_path = receive_dir.join(format!("{transfer_id}_{filename}"));
     let part_path = receive_dir.join(format!("{transfer_id}_{filename}.part"));
     let meta_path = receive_dir.join(format!("{transfer_id}_{filename}.part.meta"));
@@ -89,7 +96,11 @@ struct AuthListener {
 impl AuthListener {
     /// Binds a loopback listener that trusts `sender_identity` and runs the
     /// authenticated receive loop on a background thread.
-    fn start(receiver_identity: LocalIdentity, sender_identity: &LocalIdentity, receive_dir: PathBuf) -> Self {
+    fn start(
+        receiver_identity: LocalIdentity,
+        sender_identity: &LocalIdentity,
+        receive_dir: PathBuf,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap().to_string();
 
@@ -193,7 +204,11 @@ fn authenticated_file_round_trips_with_matching_hash() {
     .unwrap();
 
     let events = listener.received_events();
-    assert_eq!(events.len(), 1, "expected exactly one received-file callback");
+    assert_eq!(
+        events.len(),
+        1,
+        "expected exactly one received-file callback"
+    );
     let event = &events[0];
     assert_eq!(event.peer_device_id, sender.device_id());
     assert_eq!(event.filename, "auth-sample.bin");
@@ -258,8 +273,14 @@ fn authenticated_file_resumes_from_pre_seeded_partial() {
     assert_eq!(Path::new(&events[0].final_path), final_path);
     assert!(final_path.exists());
     assert_eq!(file_sha256_hex(&final_path), full_hash);
-    assert!(!part_path.exists(), "partial file should be cleaned up after resume");
-    assert!(!meta_path.exists(), "resume metadata should be cleaned up after resume");
+    assert!(
+        !part_path.exists(),
+        "partial file should be cleaned up after resume"
+    );
+    assert!(
+        !meta_path.exists(),
+        "resume metadata should be cleaned up after resume"
+    );
 
     let _ = fs::remove_dir_all(&receive_dir);
     let _ = fs::remove_dir_all(&send_dir);
@@ -301,7 +322,11 @@ fn plain_file_round_trips_with_matching_hash() {
 
     let tid = transfer_id(device_id, filename, payload.len() as u64, &expected_hash);
     let (final_path, _, _) = received_paths(&receive_dir, &tid, filename);
-    assert!(final_path.exists(), "received file should exist on disk: {}", final_path.display());
+    assert!(
+        final_path.exists(),
+        "received file should exist on disk: {}",
+        final_path.display()
+    );
     assert_eq!(file_sha256_hex(&final_path), expected_hash);
 
     let _ = fs::remove_dir_all(&receive_dir);

@@ -7,10 +7,10 @@
 pub const LINKHUB_NFC_RECORD_TYPE: &str = "linkhub.com:pair";
 
 /// Wraps a pairing payload in an NDEF-like structure.
-/// The payload is the standard `linkhub-pair-v1|...` string.
+/// The payload is the standard `linkhub-pair-v2|...` string.
 #[derive(Clone, Debug)]
 pub struct NfcPairingRecord {
-    pub payload: String, // linkhub-pair-v1|...
+    pub payload: String, // linkhub-pair-v2|...
     pub ttl_seconds: u64,
 }
 
@@ -80,10 +80,10 @@ mod tests {
 
     #[test]
     fn ndef_pairing_record_round_trips() {
-        let record = NfcPairingRecord::new("linkhub-pair-v1|abcdef|...", 60);
+        let record = NfcPairingRecord::new("linkhub-pair-v2|abcdef|...", 60);
         let bytes = record.to_ndef_bytes();
         let parsed = NfcPairingRecord::from_ndef_bytes(&bytes).unwrap();
-        assert_eq!(parsed.payload, "linkhub-pair-v1|abcdef|...");
+        assert_eq!(parsed.payload, "linkhub-pair-v2|abcdef|...");
     }
 
     #[test]

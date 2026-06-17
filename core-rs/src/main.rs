@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use linkhub_core::{
-    new_handshake_nonce, new_pairing_nonce, run_authenticated_file_sender,
+    new_handshake_nonce, run_authenticated_file_sender,
     run_authenticated_listener_with_receive_dir, run_authenticated_text_sender,
     run_connector_with_receive_dir, run_file_control_sender, run_file_sender,
     run_listener_with_receive_dir, run_text_sender, DeviceAgent, DeviceIdentity, DeviceNode,
@@ -557,12 +557,8 @@ fn run_identity_command(args: &[String]) -> Result<(), String> {
 
             let identity = load_local_identity_arg(path)
                 .map_err(|err| format!("failed to load identity at {path}: {err}"))?;
-            let invitation = PairingInvitation::new(
-                identity.identity().clone(),
-                new_pairing_nonce(),
-                Instant::now(),
-                ttl,
-            );
+            let invitation =
+                PairingInvitation::new(identity.identity().clone(), SystemTime::now(), ttl);
             println!("{}", invitation.to_payload());
             println!("fingerprint={}", invitation.identity().fingerprint());
             println!("confirmation_ttl_seconds={}", invitation.ttl().as_secs());
@@ -576,7 +572,7 @@ fn run_identity_command(args: &[String]) -> Result<(), String> {
                 ));
             }
 
-            let invitation = PairingInvitation::from_payload(&args[1], Instant::now())
+            let invitation = PairingInvitation::from_payload(&args[1], SystemTime::now())
                 .map_err(|err| format!("failed to parse pairing payload: {err}"))?;
             println!("device_id={}", invitation.identity().device_id());
             println!("device_name={}", invitation.identity().device_name());
@@ -596,7 +592,7 @@ fn run_identity_command(args: &[String]) -> Result<(), String> {
             let identity_path = &args[1];
             let identity = load_local_identity_arg(identity_path)
                 .map_err(|err| format!("failed to load identity {identity_path}: {err}"))?;
-            let invitation = PairingInvitation::from_payload(&args[2], Instant::now())
+            let invitation = PairingInvitation::from_payload(&args[2], SystemTime::now())
                 .map_err(|err| format!("failed to parse pairing payload: {err}"))?;
             let session = PairingSession::new(identity.identity().clone(), invitation);
 
@@ -622,11 +618,11 @@ fn run_identity_command(args: &[String]) -> Result<(), String> {
             let trust_store_path = &args[4];
             let identity = load_local_identity_arg(identity_path)
                 .map_err(|err| format!("failed to load identity {identity_path}: {err}"))?;
-            let invitation = PairingInvitation::from_payload(payload, Instant::now())
+            let invitation = PairingInvitation::from_payload(payload, SystemTime::now())
                 .map_err(|err| format!("failed to parse pairing payload: {err}"))?;
             let session = PairingSession::new(identity.identity().clone(), invitation);
             let trusted = session
-                .confirm(confirmation_code, Instant::now(), SystemTime::now())
+                .confirm(confirmation_code, SystemTime::now(), SystemTime::now())
                 .map_err(|err| format!("failed to confirm pairing: {err}"))?;
             let trusted_device_id = trusted.device_id().to_string();
             let trusted_fingerprint = trusted.fingerprint().to_string();
@@ -1051,6 +1047,7 @@ fn agent_from_trusted_mdns(
 
 fn run_demo() {
     let start = Instant::now();
+    let pairing_start = SystemTime::now();
     let mut agent = DeviceAgent::new("Windows-PC");
     let local_identity = DeviceIdentity::new(
         "windows-001",
@@ -1067,16 +1064,11 @@ fn run_demo() {
     let android_advertisement = MdnsAdvertisement::from_identity(&android_identity, 8787);
     let pairing_session = PairingSession::new(
         local_identity,
-        PairingInvitation::new(
-            android_identity,
-            "demo-pairing-nonce",
-            start,
-            Duration::from_secs(120),
-        ),
+        PairingInvitation::new(android_identity, pairing_start, Duration::from_secs(120)),
     );
     let pairing_code = pairing_session.confirmation_code();
     let trusted_android = pairing_session
-        .confirm(&pairing_code, start, SystemTime::now())
+        .confirm(&pairing_code, pairing_start, SystemTime::now())
         .expect("demo pairing code should match");
     let mut trust_store = TrustStore::new();
     trust_store.trust(trusted_android.clone());
@@ -1488,8 +1480,7 @@ mod tests {
         identity.save_to_path(&path).unwrap();
         let invitation = PairingInvitation::new(
             identity.identity().clone(),
-            "test-nonce",
-            Instant::now(),
+            SystemTime::now(),
             Duration::from_secs(90),
         );
         let payload = invitation.to_payload();
@@ -1525,8 +1516,7 @@ mod tests {
         local_identity.save_to_path(&local_path).unwrap();
         let invitation = PairingInvitation::new(
             peer_identity.identity().clone(),
-            "payload-nonce",
-            Instant::now(),
+            SystemTime::now(),
             Duration::from_secs(120),
         );
         let payload = invitation.to_payload();

@@ -85,6 +85,10 @@ pub(in crate::net) enum WireMessage {
     },
 }
 
+// Some constructors cover planned but not-yet-wired protocol messages
+// (signaling/relay/call/media). Keeping them next to parsing/serialization
+// preserves the wire contract while those features are staged.
+#[allow(dead_code)]
 impl WireMessage {
     pub(in crate::net) fn hello(local: &LocalDevice) -> Self {
         WireMessage::Hello {

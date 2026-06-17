@@ -55,7 +55,7 @@ function buildPairingTab() {
         <p>粘贴另一台设备的配对凭据以开始配对。</p>
         <div class="form-group">
           <label>对端的配对凭据</label>
-          <textarea id="scan-payload" placeholder="linkhub-pair-v1|..."></textarea>
+          <textarea id="scan-payload" placeholder="linkhub-pair-v2|..."></textarea>
         </div>
         <button class="btn btn-primary" data-act="inspectPeerPayload">解析</button>
         <div id="peer-info" style="display:none">

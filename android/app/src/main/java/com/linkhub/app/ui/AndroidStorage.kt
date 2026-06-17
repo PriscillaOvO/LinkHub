@@ -99,11 +99,13 @@ private fun trustedPeerFromPayload(
     payload: String
 ): TrustedPeer? {
     val fields = payload.trim().split("|")
-    if (fields.size != 7 || fields[0] !in setOf("linkhub-pair-v1", "linkhub-pair")) return null
+    if (fields.size != 7 || fields[0] != "linkhub-pair-v2") return null
 
     val publicKey = fields[3]
     val dhPublicKey = fields[4]
-    if (publicKey.isBlank() || dhPublicKey.isBlank()) return null
+    val issuedAtSecs = fields[5].toLongOrNull() ?: return null
+    val ttlSecs = fields[6].toLongOrNull() ?: return null
+    if (publicKey.isBlank() || dhPublicKey.isBlank() || issuedAtSecs <= 0 || ttlSecs <= 0) return null
 
     return TrustedPeer(
         deviceId = deviceId,

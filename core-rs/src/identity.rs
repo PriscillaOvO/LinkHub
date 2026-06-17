@@ -29,7 +29,7 @@ const SECURE_LOCAL_IDENTITY_PLATFORM_WINDOWS_DPAPI: &str = "windows-dpapi-user";
 const SECURE_LOCAL_IDENTITY_PLATFORM_MACOS_KEYCHAIN: &str = "macos-keychain";
 const SECURE_LOCAL_IDENTITY_PLATFORM_LINUX_SECRET_SERVICE: &str = "linux-secret-service";
 const HANDSHAKE_CHALLENGE_HEADER: &str = "linkhub-auth-v1";
-const PAIRING_PAYLOAD_HEADER: &str = "linkhub-pair-v1";
+const PAIRING_PAYLOAD_HEADER: &str = "linkhub-pair-v2";
 const TRUST_STORE_HEADER: &str = "linkhub_trust_store_v1";
 
 pub fn new_pairing_nonce() -> String {
@@ -103,7 +103,7 @@ pub fn decode_hex(value: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant, SystemTime};
+    use std::time::{Duration, SystemTime};
     use std::{fs, io};
 
     fn identity(device_id: &str, device_name: &str, key: &str) -> DeviceIdentity {
@@ -128,23 +128,18 @@ mod tests {
 
     #[test]
     fn pairing_code_is_same_on_both_devices() {
-        let now = Instant::now();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
         let ttl = Duration::from_secs(60);
         let phone = identity("phone-001", "Android Phone", "phone-public-key");
         let windows = identity("windows-001", "Windows PC", "windows-public-key");
 
-        // Mirror the real two-way flow: each device generated its own payload
-        // with its OWN nonce, and builds a session from the PEER's invitation.
-        // The confirmation code must still match across devices even though the
-        // two nonces differ.
+        // Mirror the real two-way flow: each device builds a session from the
+        // peer's invitation. The confirmation code must match across devices.
         let phone_session = PairingSession::new(
             phone.clone(),
-            PairingInvitation::new(windows.clone(), "nonce-from-windows", now, ttl),
+            PairingInvitation::new(windows.clone(), now, ttl),
         );
-        let windows_session = PairingSession::new(
-            windows,
-            PairingInvitation::new(phone, "nonce-from-phone", now, ttl),
-        );
+        let windows_session = PairingSession::new(windows, PairingInvitation::new(phone, now, ttl));
 
         assert_eq!(
             phone_session.confirmation_code(),
@@ -153,19 +148,65 @@ mod tests {
     }
 
     #[test]
+    fn pairing_code_differs_for_different_device_pairs() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let ttl = Duration::from_secs(60);
+        let phone = identity("phone-001", "Android Phone", "phone-public-key");
+        let windows = identity("windows-001", "Windows PC", "windows-public-key");
+        let tablet = identity("tablet-001", "Tablet", "tablet-public-key");
+
+        let first = PairingSession::new(phone.clone(), PairingInvitation::new(windows, now, ttl))
+            .confirmation_code();
+        let second = PairingSession::new(phone, PairingInvitation::new(tablet, now, ttl))
+            .confirmation_code();
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn pairing_code_is_sort_symmetric_for_distinct_fingerprints() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let ttl = Duration::from_secs(60);
+        let phone = identity("phone-001", "Android Phone", "phone-public-key");
+        let windows = identity("windows-001", "Windows PC", "windows-public-key");
+        assert_ne!(phone.fingerprint(), windows.fingerprint());
+
+        let forward = PairingSession::new(
+            phone.clone(),
+            PairingInvitation::new(windows.clone(), now, ttl),
+        )
+        .confirmation_code();
+        let reverse = PairingSession::new(windows, PairingInvitation::new(phone, now, ttl))
+            .confirmation_code();
+
+        assert_eq!(forward, reverse);
+    }
+
+    #[test]
+    fn pairing_code_has_expected_v2_length() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let phone = identity("phone-001", "Android Phone", "phone-public-key");
+        let windows = identity("windows-001", "Windows PC", "windows-public-key");
+        let code = PairingSession::new(
+            windows,
+            PairingInvitation::new(phone, now, Duration::from_secs(60)),
+        )
+        .confirmation_code();
+
+        assert_eq!(code.len(), 11);
+        assert_eq!(code.chars().filter(|ch| ch.is_ascii_hexdigit()).count(), 10);
+        assert_eq!(code.chars().nth(5), Some('-'));
+    }
+
+    #[test]
     fn pairing_confirm_accepts_normalized_code() {
-        let now = Instant::now();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
         let paired_at = SystemTime::UNIX_EPOCH + Duration::from_secs(42);
         let phone = identity("phone-001", "Android Phone", "phone-public-key");
         let windows = identity("windows-001", "Windows PC", "windows-public-key");
         let session = PairingSession::new(
             windows,
-            PairingInvitation::new(
-                phone.clone(),
-                "pairing-nonce-001",
-                now,
-                Duration::from_secs(60),
-            ),
+            PairingInvitation::new(phone.clone(), now, Duration::from_secs(60)),
         );
         let entered_code = session.confirmation_code().replace('-', " ");
 
@@ -179,12 +220,12 @@ mod tests {
 
     #[test]
     fn pairing_confirm_rejects_wrong_or_expired_code() {
-        let now = Instant::now();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
         let phone = identity("phone-001", "Android Phone", "phone-public-key");
         let windows = identity("windows-001", "Windows PC", "windows-public-key");
         let session = PairingSession::new(
             windows,
-            PairingInvitation::new(phone, "pairing-nonce-001", now, Duration::from_secs(60)),
+            PairingInvitation::new(phone, now, Duration::from_secs(60)),
         );
 
         assert_eq!(
@@ -207,10 +248,9 @@ mod tests {
 
     #[test]
     fn pairing_invitation_payload_round_trips() {
-        let now = Instant::now();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
         let invitation = PairingInvitation::new(
             identity("phone-001", "Android Phone", "phone-public-key"),
-            "nonce-001",
             now,
             Duration::from_secs(120),
         );
@@ -219,24 +259,64 @@ mod tests {
         let parsed = PairingInvitation::from_payload(&payload, now).unwrap();
 
         assert_eq!(parsed.identity(), invitation.identity());
-        assert_eq!(parsed.nonce(), "nonce-001");
+        assert_eq!(parsed.issued_at(), now);
         assert_eq!(parsed.ttl(), Duration::from_secs(120));
         assert!(!parsed.is_expired(now + Duration::from_secs(119)));
         assert!(parsed.is_expired(now + Duration::from_secs(121)));
     }
 
     #[test]
+    fn pairing_invitation_payload_rejects_expired_payload() {
+        let issued_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let invitation = PairingInvitation::new(
+            identity("phone-001", "Android Phone", "phone-public-key"),
+            issued_at,
+            Duration::from_secs(120),
+        );
+
+        assert!(PairingInvitation::from_payload(
+            &invitation.to_payload(),
+            issued_at + Duration::from_secs(121)
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn pairing_invitation_payload_accepts_unexpired_payload() {
+        let issued_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let invitation = PairingInvitation::new(
+            identity("phone-001", "Android Phone", "phone-public-key"),
+            issued_at,
+            Duration::from_secs(120),
+        );
+
+        let parsed = PairingInvitation::from_payload(
+            &invitation.to_payload(),
+            issued_at + Duration::from_secs(119),
+        )
+        .unwrap();
+
+        assert_eq!(parsed.identity(), invitation.identity());
+        assert_eq!(parsed.issued_at(), issued_at);
+    }
+
+    #[test]
     fn pairing_invitation_payload_rejects_invalid_values() {
-        let now = Instant::now();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
 
         assert!(PairingInvitation::from_payload("not-linkhub", now).is_err());
         assert!(PairingInvitation::from_payload(
-            "linkhub-pair-v1|70686f6e652d303031|416e64726f69642050686f6e65||6e6f6e6365|120",
+            "linkhub-pair-v2|70686f6e652d303031|416e64726f69642050686f6e65||00|1000|120",
             now
         )
         .is_err());
         assert!(PairingInvitation::from_payload(
-            "linkhub-pair-v1|70686f6e652d303031|416e64726f69642050686f6e65|key|6e6f6e6365|0",
+            "linkhub-pair-v2|70686f6e652d303031|416e64726f69642050686f6e65|key|00|1000|0",
+            now
+        )
+        .is_err());
+        assert!(PairingInvitation::from_payload(
+            "linkhub-pair-v1|70686f6e652d303031|416e64726f69642050686f6e65|key|00|6e6f6e6365|120",
             now
         )
         .is_err());

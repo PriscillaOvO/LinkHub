@@ -139,6 +139,7 @@ mod tests {
     #[test]
     fn confirmed_pairing_allows_later_discovery() {
         let now = Instant::now();
+        let pairing_now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
         let local = DeviceIdentity::new(
             "windows-001",
             "Windows PC",
@@ -153,10 +154,14 @@ mod tests {
         );
         let session = PairingSession::new(
             local,
-            PairingInvitation::new(peer, "pairing-nonce-001", now, Duration::from_secs(60)),
+            PairingInvitation::new(peer, pairing_now, Duration::from_secs(60)),
         );
         let trusted = session
-            .confirm(&session.confirmation_code(), now, SystemTime::UNIX_EPOCH)
+            .confirm(
+                &session.confirmation_code(),
+                pairing_now,
+                SystemTime::UNIX_EPOCH,
+            )
             .unwrap();
         let endpoint = DiscoveryEndpoint::lan_tcp(
             "phone-001",

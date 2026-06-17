@@ -50,17 +50,17 @@ cd C:\Dev\VSCode\LinkHub\core-rs
 # 生成身份
 cargo run -- identity init C:\LinkHub\sender-id.txt "Windows PC B"
 
-# 生成配对 payload（记下完整的 linkhub-pair-v1|... 字符串）
+# 生成配对 payload（记下完整的 linkhub-pair-v2|... 字符串）
 cargo run -- identity pairing-payload C:\LinkHub\sender-id.txt 300
 ```
 
-**Expected:** 输出 `linkhub-pair-v1|...` 和 fingerprint
+**Expected:** 输出 `linkhub-pair-v2|...` 和 fingerprint
 
 ---
 
 ## Step 3：设备 A — 接收配对
 
-把设备 B 的 `linkhub-pair-v1|...` 字符串复制到设备 A：
+把设备 B 的 `linkhub-pair-v2|...` 字符串复制到设备 A：
 
 ```powershell
 # 计算确认码

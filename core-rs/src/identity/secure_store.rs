@@ -8,14 +8,13 @@
 use std::collections::HashMap;
 use std::io;
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use super::sha256_hex;
 use super::{
     decode_hex, encode_hex, SECURE_LOCAL_IDENTITY_HEADER,
     SECURE_LOCAL_IDENTITY_PLATFORM_LINUX_SECRET_SERVICE,
-    SECURE_LOCAL_IDENTITY_PLATFORM_MACOS_KEYCHAIN,
-    SECURE_LOCAL_IDENTITY_PLATFORM_WINDOWS_DPAPI,
+    SECURE_LOCAL_IDENTITY_PLATFORM_MACOS_KEYCHAIN, SECURE_LOCAL_IDENTITY_PLATFORM_WINDOWS_DPAPI,
 };
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-use super::sha256_hex;
 
 pub(super) fn format_secure_local_identity_file(encrypted_bytes: &[u8]) -> String {
     let platform = secure_platform_label();

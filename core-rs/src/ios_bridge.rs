@@ -6,9 +6,9 @@
 
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
-use crate::{new_pairing_nonce, LocalIdentity, PairingInvitation, PairingSession};
+use crate::{LocalIdentity, PairingInvitation, PairingSession};
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -93,8 +93,7 @@ pub extern "C" fn linkhub_generate_pairing_payload(
     );
     let invitation = PairingInvitation::new(
         identity,
-        new_pairing_nonce(),
-        Instant::now(),
+        SystemTime::now(),
         Duration::from_secs(ttl_seconds),
     );
     string_to_c(&invitation.to_payload())
@@ -114,7 +113,7 @@ pub extern "C" fn linkhub_parse_pairing_payload(
         let pk = jni["public_key"].as_str().unwrap_or("");
         let dh = jni["dh_public_key"].as_str().unwrap_or("");
         let local = crate::DeviceIdentity::new(did, dname, pk, dh);
-        let invitation = PairingInvitation::from_payload(&payload, Instant::now())
+        let invitation = PairingInvitation::from_payload(&payload, SystemTime::now())
             .map_err(|e| format!("{e}"))?;
         let session = PairingSession::new(local, invitation);
         Ok(serde_json::json!({
@@ -147,11 +146,11 @@ pub extern "C" fn linkhub_confirm_pairing(
         let pk = jni["public_key"].as_str().unwrap_or("");
         let dh = jni["dh_public_key"].as_str().unwrap_or("");
         let local = crate::DeviceIdentity::new(did, dname, pk, dh);
-        let invitation = PairingInvitation::from_payload(&payload, Instant::now())
+        let invitation = PairingInvitation::from_payload(&payload, SystemTime::now())
             .map_err(|e| format!("{e}"))?;
         let session = PairingSession::new(local, invitation);
         let trusted = session
-            .confirm(&code, Instant::now(), SystemTime::now())
+            .confirm(&code, SystemTime::now(), SystemTime::now())
             .map_err(|e| format!("{e}"))?;
         Ok(serde_json::json!({
             "success": true,

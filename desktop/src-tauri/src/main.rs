@@ -2,8 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use linkhub_core::{
-    new_pairing_nonce, DiscoveryEndpoint, LocalIdentity, MdnsAdvertisement, MdnsRegistration,
-    MdnsRuntime, PairingInvitation, PairingSession, TrustStore,
+    DiscoveryEndpoint, LocalIdentity, MdnsAdvertisement, MdnsRegistration, MdnsRuntime,
+    PairingInvitation, PairingSession, TrustStore,
 };
 use qrcode::render::svg;
 use qrcode::QrCode;
@@ -12,7 +12,7 @@ use std::net::{TcpListener, UdpSocket};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
@@ -133,7 +133,12 @@ fn fallback_data_dir() -> std::path::PathBuf {
 fn history_fallback() -> &'static str {
     static FALLBACK: OnceLock<String> = OnceLock::new();
     FALLBACK
-        .get_or_init(|| fallback_data_dir().join("history.json").display().to_string())
+        .get_or_init(|| {
+            fallback_data_dir()
+                .join("history.json")
+                .display()
+                .to_string()
+        })
         .as_str()
 }
 
@@ -232,7 +237,10 @@ fn default_config(app: tauri::AppHandle) -> DefaultConfig {
     // Keychain / Linux Secret Service backends land, default to a plaintext
     // identity file off-Windows.
     let identity_path = if cfg!(windows) {
-        format!("secure:{}", base.join("local-identity.secure.txt").display())
+        format!(
+            "secure:{}",
+            base.join("local-identity.secure.txt").display()
+        )
     } else {
         base.join("local-identity.txt").display().to_string()
     };
@@ -255,8 +263,7 @@ fn pairing_generate_qr(identity_path: String, ttl_seconds: u64) -> Result<QrPayl
     let identity = load_identity(&identity_path)?;
     let invitation = PairingInvitation::new(
         identity.identity().clone(),
-        new_pairing_nonce(),
-        Instant::now(),
+        SystemTime::now(),
         std::time::Duration::from_secs(ttl_seconds),
     );
     let payload = invitation.to_payload();
@@ -282,7 +289,7 @@ fn pairing_generate_qr(identity_path: String, ttl_seconds: u64) -> Result<QrPayl
 fn pairing_inspect(identity_path: String, payload: String) -> Result<PeerInfo, String> {
     let identity = load_identity(&identity_path)?;
     let invitation =
-        PairingInvitation::from_payload(&payload, Instant::now()).map_err(|e| format!("{e}"))?;
+        PairingInvitation::from_payload(&payload, SystemTime::now()).map_err(|e| format!("{e}"))?;
     let session = PairingSession::new(identity.identity().clone(), invitation);
     Ok(PeerInfo {
         device_name: session.peer_identity().device_name().to_string(),
@@ -301,10 +308,10 @@ fn pairing_confirm(
 ) -> Result<TrustedPeer, String> {
     let identity = load_identity(&identity_path)?;
     let invitation =
-        PairingInvitation::from_payload(&payload, Instant::now()).map_err(|e| format!("{e}"))?;
+        PairingInvitation::from_payload(&payload, SystemTime::now()).map_err(|e| format!("{e}"))?;
     let session = PairingSession::new(identity.identity().clone(), invitation);
     let trusted = session
-        .confirm(&confirmation_code, Instant::now(), SystemTime::now())
+        .confirm(&confirmation_code, SystemTime::now(), SystemTime::now())
         .map_err(|e| format!("pairing failed: {e}"))?;
     let device_id = trusted.device_id().to_string();
     let device_name = trusted.device_name().to_string();
@@ -800,7 +807,11 @@ fn main() {
 
             TrayIconBuilder::with_id("linkhub-tray")
                 .tooltip("LinkHub")
-                .icon(app.default_window_icon().expect("missing window icon").clone())
+                .icon(
+                    app.default_window_icon()
+                        .expect("missing window icon")
+                        .clone(),
+                )
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -906,7 +917,7 @@ mod tests {
 
         // Generate QR payload
         let qr = pairing_generate_qr(ip.clone(), 120).unwrap();
-        assert!(qr.payload.starts_with("linkhub-pair-v1|"));
+        assert!(qr.payload.starts_with("linkhub-pair-v2|"));
         assert!(!qr.qr_svg.is_empty());
 
         // Inspect our own payload (as if peer scanned it)

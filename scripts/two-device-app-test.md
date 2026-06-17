@@ -45,7 +45,7 @@ adb install -r android\app\build\outputs\apk\release\app-release.apk
 
 1. 桌面 **Pair** 标签页：生成本机配对二维码（对应 `pairing_generate_qr`）。
 2. Android 打开 **Pair** 页 → 「扫码导入配对码」→ 对准桌面屏幕二维码。
-3. 手机识别到 `linkhub-pair-v1|...` 后自动填入，核对**确认码/指纹**与桌面显示一致 → 确认信任。
+3. 手机识别到 `linkhub-pair-v2|...` 后自动填入，核对**确认码/指纹**与桌面显示一致 → 确认信任。
 
 **Expected:** Android 侧出现可信设备「Windows PC」；指纹两端一致。
 
@@ -53,7 +53,7 @@ adb install -r android\app\build\outputs\apk\release\app-release.apk
 
 ## Step 3 — 反向配对（手机出码，桌面粘贴）
 
-1. Android **Pair** 页：生成本机 payload（复制 `linkhub-pair-v1|...` 文本）。
+1. Android **Pair** 页：生成本机 payload（复制 `linkhub-pair-v2|...` 文本）。
 2. 通过任意方式把该文本传到桌面（剪贴板同步 / 临时发一条文本均可）。
 3. 桌面 **Pair** 页：把 payload 粘贴进「查看对方信息 / 确认配对」输入框（对应 `pairing_inspect` → `pairing_confirm`），核对确认码后确认。
 

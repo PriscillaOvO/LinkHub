@@ -47,3 +47,21 @@ fun loadServiceStatus(ctx: Context): LinkHubServiceStatus {
         updatedAtMillis = prefs.getLong("updated_at_millis", 0)
     )
 }
+
+fun reconcileServiceStatus(ctx: Context, liveRunning: Boolean): LinkHubServiceStatus {
+    val status = loadServiceStatus(ctx)
+    if (liveRunning || !status.running) return status
+
+    ctx.getSharedPreferences(SERVICE_STATUS_PREFS, Context.MODE_PRIVATE)
+        .edit()
+        .putBoolean("running", false)
+        .putString("listen_addr", status.listenAddr)
+        .putString("receive_dir", status.receiveDir)
+        .putString("detail", status.detail.ifBlank { "listener stopped" })
+        .putString("error", status.error)
+        .putString("mdns_service_name", status.mdnsServiceName)
+        .putLong("updated_at_millis", System.currentTimeMillis())
+        .apply()
+
+    return status.copy(running = false, detail = status.detail.ifBlank { "listener stopped" })
+}
