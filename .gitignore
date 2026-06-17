@@ -19,3 +19,6 @@ android/keystore.properties
 *.log
 .DS_Store
 Thumbs.db
+# Screenshots / scratch captures — kept in a dedicated local folder, never committed
+.screenshots/
+phone-*.png

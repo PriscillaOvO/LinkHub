@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sha=$(git -C \"$CLAUDE_PROJECT_DIR\" rev-parse --short HEAD 2>/dev/null); printf '%s | %s | session ended\\n' \"$(date '+%Y-%m-%d %H:%M %z')\" \"${sha:-nogit}\" >> \"$CLAUDE_PROJECT_DIR/docs/ai-handoff/worklog/sessions.log\" 2>/dev/null || true",
+            "timeout": 10,
+            "statusMessage": "Recording worklog session marker"
+          }
+        ]
+      }
+    ]
+  }
+}

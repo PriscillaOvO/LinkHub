@@ -52,6 +52,33 @@ document.querySelectorAll('.tab-bar .tab').forEach(btn => {
   });
 });
 
+// ── Event delegation ───────────────────────────────────────────────
+// Inline on* handlers (onclick="fn()") do NOT fire in Tauri's packaged
+// builds: Tauri injects a nonce into the CSP script-src, which makes the
+// browser ignore 'unsafe-inline', disabling inline event-handler attributes.
+// So all interactive elements declare data-act / data-change instead, and a
+// single delegated listener invokes the named global function with the
+// data-a0..a3 string arguments.
+function collectActionArgs(el) {
+  const args = [];
+  for (let i = 0; el.dataset['a' + i] !== undefined; i++) args.push(el.dataset['a' + i]);
+  return args;
+}
+
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-act]');
+  if (!el) return;
+  const fn = window[el.dataset.act];
+  if (typeof fn === 'function') fn(...collectActionArgs(el));
+});
+
+document.addEventListener('change', (e) => {
+  const el = e.target.closest('[data-change]');
+  if (!el) return;
+  const fn = window[el.dataset.change];
+  if (typeof fn === 'function') fn(...collectActionArgs(el));
+});
+
 // ── Status bar ─────────────────────────────────────────────────────
 
 function setStatus(msg, type) {

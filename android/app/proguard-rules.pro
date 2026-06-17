@@ -15,10 +15,30 @@
 -keep,allowshrinking class androidx.compose.** { *; }
 -dontwarn androidx.compose.**
 
-# --- Gson (used for trust store / history serialization) ----------------
+# --- Gson (used for identity / trust store / history serialization) -----
 # Keep generic signatures and annotations so reflective (de)serialization of
 # model classes survives shrinking.
 -keepattributes Signature, *Annotation*, EnclosingMethod, InnerClasses
+
+# Gson DTOs are populated purely by reflection, so R8's static analysis sees
+# their fields/constructors as unused and strips/renames them — which makes
+# gson.fromJson return null/throw at runtime (e.g. "创建失败" on identity gen).
+# Keep these model classes and their members intact. Covers fields both with
+# and without @SerializedName.
+-keep class com.linkhub.app.ui.IdentityJson { *; }
+-keep class com.linkhub.app.ui.PeerInfoJson { *; }
+-keep class com.linkhub.app.ui.PairResultJson { *; }
+-keep class com.linkhub.app.ui.TrustedPeer { *; }
+-keep class com.linkhub.app.ui.SendResultJson { *; }
+-keep class com.linkhub.app.ui.TransmissionHistoryEntry { *; }
+-keep class com.linkhub.app.ui.DiscoveredPeerAddress { *; }
+-keep class com.linkhub.app.ui.AndroidNetworkHint { *; }
+-keep class com.linkhub.app.service.LinkHubService$ListenerResult { *; }
+
+# Belt-and-suspenders: never strip/rename any field annotated for Gson.
+-keepclassmembers class * {
+    @com.google.gson.annotations.SerializedName <fields>;
+}
 
 # --- General ------------------------------------------------------------
 # Preserve line numbers for readable release stack traces.

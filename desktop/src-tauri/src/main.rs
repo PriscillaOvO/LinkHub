@@ -412,7 +412,7 @@ fn trusted_discovered_peers(
 }
 
 #[tauri::command]
-fn scan_trusted_mdns(
+async fn scan_trusted_mdns(
     trust_store_path: String,
     timeout_seconds: u64,
 ) -> Result<Vec<DiscoveredPeer>, String> {
@@ -452,7 +452,7 @@ fn choose_folder_path(app: tauri::AppHandle) -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-fn send_encrypted_text(
+async fn send_encrypted_text(
     peer_addr: String,
     identity_path: String,
     peer_device_id: String,
@@ -502,12 +502,12 @@ fn send_encrypted_text(
     Ok(SendResult {
         success: true,
         message_id: String::new(),
-        detail: "text sent and acknowledged".to_string(),
+        detail: "文本已发送并确认".to_string(),
     })
 }
 
 #[tauri::command]
-fn send_encrypted_file(
+async fn send_encrypted_file(
     peer_addr: String,
     identity_path: String,
     peer_device_id: String,
@@ -563,7 +563,7 @@ fn send_encrypted_file(
     Ok(SendResult {
         success: true,
         message_id: String::new(),
-        detail: "file sent and acknowledged".to_string(),
+        detail: "文件已发送并确认".to_string(),
     })
 }
 

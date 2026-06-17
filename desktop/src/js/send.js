@@ -10,50 +10,50 @@ function buildSendTab() {
   const section = document.getElementById('tab-send');
   section.innerHTML = `
     <div class="card">
-      <h3>Send Text</h3>
+      <h3>发送文本</h3>
       <div class="form-group">
-        <label>Target device</label>
-        <select id="send-device-select" onchange="onSendPeerChanged('text')">
-          <option value="">-- Load device list first --</option>
+        <label>目标设备</label>
+        <select id="send-device-select" data-change="onSendPeerChanged" data-a0="text">
+          <option value="">-- 请先加载设备列表 --</option>
         </select>
       </div>
       <div class="form-group">
-        <label>Target address (IP:port)</label>
+        <label>目标地址（IP:端口）</label>
         <div class="inline-row">
           <input type="text" id="send-addr" placeholder="127.0.0.1:8787">
-          <button class="btn btn-secondary" onclick="scanAddressForSend('text')">Scan LAN</button>
+          <button class="btn btn-secondary" data-act="scanAddressForSend" data-a0="text">扫描局域网</button>
         </div>
       </div>
       <div class="form-group">
-        <label>Message</label>
-        <textarea id="send-text" placeholder="Type your message..."></textarea>
+        <label>消息内容</label>
+        <textarea id="send-text" placeholder="输入要发送的消息…"></textarea>
       </div>
-      <button class="btn btn-primary" onclick="sendText()">Send Text</button>
+      <button class="btn btn-primary" data-act="sendText">发送文本</button>
     </div>
 
     <div class="card">
-      <h3>Send File</h3>
+      <h3>发送文件</h3>
       <div class="form-group">
-        <label>Target device</label>
-        <select id="send-file-device-select" onchange="onSendPeerChanged('file')">
-          <option value="">-- Load device list first --</option>
+        <label>目标设备</label>
+        <select id="send-file-device-select" data-change="onSendPeerChanged" data-a0="file">
+          <option value="">-- 请先加载设备列表 --</option>
         </select>
       </div>
       <div class="form-group">
-        <label>Target address (IP:port)</label>
+        <label>目标地址（IP:端口）</label>
         <div class="inline-row">
           <input type="text" id="send-file-addr" placeholder="127.0.0.1:8787">
-          <button class="btn btn-secondary" onclick="scanAddressForSend('file')">Scan LAN</button>
+          <button class="btn btn-secondary" data-act="scanAddressForSend" data-a0="file">扫描局域网</button>
         </div>
       </div>
       <div class="form-group">
-        <label>File path</label>
+        <label>文件路径</label>
         <div class="inline-row">
           <input type="text" id="send-file-path" placeholder="C:\\path\\to\\file.txt">
-          <button class="btn btn-secondary" onclick="chooseFileForSend()">Browse...</button>
+          <button class="btn btn-secondary" data-act="chooseFileForSend">浏览…</button>
         </div>
       </div>
-      <button class="btn btn-primary" onclick="sendFile()">Send File</button>
+      <button class="btn btn-primary" data-act="sendFile">发送文件</button>
     </div>
     <div id="send-msg"></div>
   `;
@@ -75,7 +75,7 @@ async function renderSendTab() {
     });
     cachedPeers = result.trusted_devices;
 
-    const opts = '<option value="">-- Select device --</option>' +
+    const opts = '<option value="">-- 选择设备 --</option>' +
       cachedPeers.map(d =>
         `<option value="${escHtml(d.device_id)}">${escHtml(d.device_name)} (${escHtml(d.device_id)})</option>`
       ).join('');
@@ -84,7 +84,7 @@ async function renderSendTab() {
     document.getElementById('send-file-device-select').innerHTML = opts;
     applyPendingSendSelection();
   } catch (err) {
-    showMessage('send-msg', 'Failed to load devices: ' + err.message, 'error');
+    showMessage('send-msg', '加载设备失败：' + err.message, 'error');
   }
 }
 
@@ -109,7 +109,7 @@ function applyPendingSendSelection() {
   selectEl.value = peerDeviceId;
   onSendPeerChanged(kind);
   pendingSendSelection = null;
-  setStatus('Selected target device for sending', 'ok');
+  setStatus('已选择发送目标设备', 'ok');
 }
 
 function onSendPeerChanged(kind) {
@@ -120,7 +120,7 @@ function onSendPeerChanged(kind) {
   if (savedAddr) {
     document.getElementById(addrId).value = savedAddr;
     lastAutoAddr[kind] = savedAddr;
-    setStatus('Loaded saved address for selected device', 'ok');
+    setStatus('已载入所选设备的已保存地址', 'ok');
   }
 }
 
@@ -150,10 +150,10 @@ async function chooseFileForSend() {
     const path = await tauriInvoke('choose_file_path');
     if (path) {
       document.getElementById('send-file-path').value = path;
-      setStatus('Selected file', 'ok');
+      setStatus('已选择文件', 'ok');
     }
   } catch (err) {
-    showMessage('send-msg', 'File picker error: ' + err.message, 'error');
+    showMessage('send-msg', '文件选择出错：' + err.message, 'error');
   }
 }
 
@@ -163,11 +163,11 @@ async function scanAddressForSend(kind) {
   const peerDeviceId = document.getElementById(selectId).value;
   const trustStorePath = getSetting('trustStorePath');
   if (!peerDeviceId) {
-    showMessage('send-msg', 'Select a target device first', 'error');
+    showMessage('send-msg', '请先选择目标设备', 'error');
     return;
   }
 
-  setStatus('Scanning LAN for selected device...', 'info');
+  setStatus('正在局域网扫描所选设备…', 'info');
   try {
     const peers = await tauriInvoke('scan_trusted_mdns', {
       trustStorePath,
@@ -176,15 +176,15 @@ async function scanAddressForSend(kind) {
     peers.forEach(peer => setPeerAddress(peer.device_id, peer.address));
     const found = peers.find(peer => peer.device_id === peerDeviceId);
     if (!found) {
-      showMessage('send-msg', 'Selected device was not found on LAN.', 'info');
+      showMessage('send-msg', '局域网未发现所选设备。', 'info');
       return;
     }
     document.getElementById(addrId).value = found.address;
-    setStatus('Loaded discovered address', 'ok');
-    showMessage('send-msg', `Discovered ${found.device_name}: ${found.address}`, 'success');
+    setStatus('已载入发现的地址', 'ok');
+    showMessage('send-msg', `已发现 ${found.device_name}：${found.address}`, 'success');
   } catch (err) {
-    showMessage('send-msg', 'LAN scan error: ' + err.message, 'error');
-    setStatus('LAN scan failed', 'error');
+    showMessage('send-msg', '局域网扫描出错：' + err.message, 'error');
+    setStatus('局域网扫描失败', 'error');
   }
 }
 
@@ -197,7 +197,7 @@ async function sendText() {
   const text = document.getElementById('send-text').value.trim();
 
   if (!peerDeviceId || !addr || !text) {
-    showMessage('send-msg', 'Fill in all fields', 'error');
+    showMessage('send-msg', '请填写所有字段', 'error');
     return;
   }
 
@@ -207,9 +207,9 @@ async function sendText() {
     });
     setPeerAddress(peerDeviceId, addr);
     showMessage('send-msg', result.detail, 'success');
-    setStatus('Text sent', 'ok');
+    setStatus('文本已发送', 'ok');
   } catch (err) {
-    showMessage('send-msg', 'Error: ' + err.message, 'error');
+    showMessage('send-msg', '错误：' + err.message, 'error');
   }
 }
 
@@ -222,7 +222,7 @@ async function sendFile() {
   const filePath = document.getElementById('send-file-path').value.trim();
 
   if (!peerDeviceId || !addr || !filePath) {
-    showMessage('send-msg', 'Fill in all fields', 'error');
+    showMessage('send-msg', '请填写所有字段', 'error');
     return;
   }
 
@@ -232,9 +232,9 @@ async function sendFile() {
     });
     setPeerAddress(peerDeviceId, addr);
     showMessage('send-msg', result.detail, 'success');
-    setStatus('File sent', 'ok');
+    setStatus('文件已发送', 'ok');
   } catch (err) {
-    showMessage('send-msg', 'Error: ' + err.message, 'error');
+    showMessage('send-msg', '错误：' + err.message, 'error');
   }
 }
 

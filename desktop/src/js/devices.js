@@ -4,20 +4,20 @@ function buildDevicesTab() {
   const section = document.getElementById('tab-devices');
   section.innerHTML = `
     <div class="card">
-      <h3>This Device</h3>
+      <h3>本机设备</h3>
       <div id="local-status">
-        <p class="device-meta">Click "Load Status" to show device info.</p>
+        <p class="device-meta">点击「加载状态」以显示设备信息。</p>
       </div>
     </div>
     <div class="card">
-      <h3>Trusted Devices</h3>
+      <h3>可信设备</h3>
       <div id="trusted-list">
-        <p class="device-meta">Load your status to see trusted devices.</p>
+        <p class="device-meta">加载状态后即可查看可信设备。</p>
       </div>
     </div>
     <div style="display:flex;gap:12px;align-items:center;margin:12px 0">
-      <button class="btn btn-primary" onclick="renderDevicesTab()">Load Status</button>
-      <button class="btn btn-secondary" onclick="scanTrustedMdns()">Scan LAN</button>
+      <button class="btn btn-primary" data-act="renderDevicesTab">加载状态</button>
+      <button class="btn btn-secondary" data-act="scanTrustedMdns">扫描局域网</button>
     </div>
     <p class="device-meta">局域网地址每数秒自动发现刷新，无需手动扫描。</p>
     <div id="devices-msg"></div>
@@ -39,7 +39,7 @@ async function renderDevicesTab() {
   const trustStorePath = getSetting('trustStorePath');
   if (!identityPath) {
     document.getElementById('local-status').innerHTML =
-      '<p class="device-meta">Set identity path in Pair → Settings first.</p>';
+      '<p class="device-meta">请先在「配对 → 设置」中填写身份文件路径。</p>';
     return;
   }
 
@@ -50,21 +50,21 @@ async function renderDevicesTab() {
 
     document.getElementById('local-status').innerHTML = `
       <p><strong>${result.local_device_name}</strong></p>
-      <p>ID: <code>${result.local_device_id}</code></p>
-      <p>Fingerprint: <code>${result.local_fingerprint}</code></p>
+      <p>ID：<code>${result.local_device_id}</code></p>
+      <p>指纹：<code>${result.local_fingerprint}</code></p>
     `;
 
     if (result.trusted_devices.length === 0) {
       document.getElementById('trusted-list').innerHTML =
-        '<p class="device-meta">No trusted devices yet. Go to Pair tab to add one.</p>';
+        '<p class="device-meta">暂无可信设备。请到「配对」页添加。</p>';
     } else {
       const items = result.trusted_devices.map(d => deviceListItem(d)).join('');
       document.getElementById('trusted-list').innerHTML =
         `<ul class="device-list">${items}</ul>`;
     }
-    setStatus(`${result.trusted_devices.length} trusted device(s)`, 'ok');
+    setStatus(`共 ${result.trusted_devices.length} 台可信设备`, 'ok');
   } catch (err) {
-    showMessage('devices-msg', 'Error: ' + err.message, 'error');
+    showMessage('devices-msg', '错误：' + err.message, 'error');
   }
 }
 
@@ -80,16 +80,16 @@ function deviceListItem(device) {
               <span class="device-name">${escHtml(device.device_name)}</span>
               <span class="device-state" title="${statusTitle}">${statusDot}</span>
             </div>
-            <div class="device-meta">ID: <code>${escHtml(device.device_id)}</code></div>
-            <div class="device-meta">Fingerprint: <code>${escHtml(device.fingerprint)}</code></div>
-            <div class="device-meta">Address: <code>${escHtml(address)}</code></div>
+            <div class="device-meta">ID：<code>${escHtml(device.device_id)}</code></div>
+            <div class="device-meta">指纹：<code>${escHtml(device.fingerprint)}</code></div>
+            <div class="device-meta">地址：<code>${escHtml(address)}</code></div>
             <div class="device-meta">${escHtml(presenceLabel(device.device_id))}</div>
             <div class="device-actions">
-              <button class="btn btn-secondary btn-small" onclick="copyDeviceField('${escJs(device.device_id)}', 'Device ID')">Copy ID</button>
-              <button class="btn btn-secondary btn-small" onclick="copyDeviceAddress('${escJs(device.device_id)}')">Copy Address</button>
-              <button class="btn btn-secondary btn-small" onclick="scanSingleDevice('${escJs(device.device_id)}')">Refresh</button>
-              <button class="btn btn-primary btn-small" onclick="selectPeerForSend('${escJs(device.device_id)}', 'text')">Send Text</button>
-              <button class="btn btn-secondary btn-small" onclick="selectPeerForSend('${escJs(device.device_id)}', 'file')">Send File</button>
+              <button class="btn btn-secondary btn-small" data-act="copyDeviceField" data-a0="${escHtml(device.device_id)}" data-a1="设备 ID">复制 ID</button>
+              <button class="btn btn-secondary btn-small" data-act="copyDeviceAddress" data-a0="${escHtml(device.device_id)}">复制地址</button>
+              <button class="btn btn-secondary btn-small" data-act="scanSingleDevice" data-a0="${escHtml(device.device_id)}">刷新</button>
+              <button class="btn btn-primary btn-small" data-act="selectPeerForSend" data-a0="${escHtml(device.device_id)}" data-a1="text">发送文本</button>
+              <button class="btn btn-secondary btn-small" data-act="selectPeerForSend" data-a0="${escHtml(device.device_id)}" data-a1="file">发送文件</button>
             </div>
           </div>
         </li>
@@ -99,11 +99,11 @@ function deviceListItem(device) {
 async function scanTrustedMdns() {
   const trustStorePath = getSetting('trustStorePath');
   if (!trustStorePath) {
-    showMessage('devices-msg', 'Trust store path is not configured.', 'error');
+    showMessage('devices-msg', '尚未配置信任库路径。', 'error');
     return;
   }
 
-  setStatus('Scanning LAN for trusted devices...', 'info');
+  setStatus('正在局域网扫描可信设备…', 'info');
   try {
     const peers = await tauriInvoke('scan_trusted_mdns', {
       trustStorePath,
@@ -117,25 +117,25 @@ async function scanTrustedMdns() {
     });
 
     if (peers.length === 0) {
-      showMessage('devices-msg', 'No trusted LinkHub devices found on LAN.', 'info');
+      showMessage('devices-msg', '局域网未发现可信的 LinkHub 设备。', 'info');
     } else {
-      showMessage('devices-msg', `Found ${peers.length} trusted device address(es).`, 'success');
+      showMessage('devices-msg', `发现 ${peers.length} 个可信设备地址。`, 'success');
     }
     await renderDevicesTab();
   } catch (err) {
-    showMessage('devices-msg', 'LAN scan error: ' + err.message, 'error');
-    setStatus('LAN scan failed', 'error');
+    showMessage('devices-msg', '局域网扫描出错：' + err.message, 'error');
+    setStatus('局域网扫描失败', 'error');
   }
 }
 
 async function scanSingleDevice(deviceId) {
   const trustStorePath = getSetting('trustStorePath');
   if (!trustStorePath) {
-    showMessage('devices-msg', 'Trust store path is not configured.', 'error');
+    showMessage('devices-msg', '尚未配置信任库路径。', 'error');
     return;
   }
 
-  setStatus('Scanning LAN for selected device...', 'info');
+  setStatus('正在局域网扫描所选设备…', 'info');
   try {
     const peers = await tauriInvoke('scan_trusted_mdns', {
       trustStorePath,
@@ -148,32 +148,32 @@ async function scanSingleDevice(deviceId) {
     });
     const found = peers.find(peer => peer.device_id === deviceId);
     if (!found) {
-      showMessage('devices-msg', 'Selected device was not found on LAN.', 'info');
+      showMessage('devices-msg', '局域网未发现所选设备。', 'info');
       await renderDevicesTab();
       return;
     }
-    showMessage('devices-msg', `Updated ${found.device_name}: ${found.address}`, 'success');
-    setStatus('Device address updated', 'ok');
+    showMessage('devices-msg', `已更新 ${found.device_name}：${found.address}`, 'success');
+    setStatus('设备地址已更新', 'ok');
     await renderDevicesTab();
   } catch (err) {
-    showMessage('devices-msg', 'LAN scan error: ' + err.message, 'error');
-    setStatus('LAN scan failed', 'error');
+    showMessage('devices-msg', '局域网扫描出错：' + err.message, 'error');
+    setStatus('局域网扫描失败', 'error');
   }
 }
 
 async function copyDeviceField(text, label) {
   await copyText(text);
-  showMessage('devices-msg', `${label} copied`, 'success');
+  showMessage('devices-msg', `${label} 已复制`, 'success');
 }
 
 async function copyDeviceAddress(deviceId) {
   const address = getPeerAddress(deviceId);
   if (!address) {
-    showMessage('devices-msg', 'No cached address for this device.', 'info');
+    showMessage('devices-msg', '该设备暂无缓存地址。', 'info');
     return;
   }
   await copyText(address);
-  showMessage('devices-msg', 'Address copied', 'success');
+  showMessage('devices-msg', '地址已复制', 'success');
 }
 
 async function copyText(text) {

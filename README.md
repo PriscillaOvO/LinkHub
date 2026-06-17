@@ -37,11 +37,11 @@ scripts/                 本地验证脚本
 建议新接手时优先阅读：
 
 ```text
-docs/项目总览报告.md
-docs/项目状态.md
-docs/环境部署.md
-docs/真机测试指南.md
-docs/开发路线图.md
+docs/spec/项目总览报告.md
+docs/spec/项目状态.md
+docs/spec/环境部署.md
+docs/spec/真机测试指南.md
+docs/spec/开发路线图.md
 ```
 
 完整文档导航见 [docs/README.md](docs/README.md)。
@@ -55,7 +55,7 @@ docs/开发路线图.md
 - Android AVD: `LinkHub_API_34`
 - Android target/build tools: API 34 / Build Tools 34.0.0
 
-详细部署和验证命令见 [docs/环境部署.md](docs/环境部署.md)。
+详细部署和验证命令见 [docs/spec/环境部署.md](docs/spec/环境部署.md)。
 
 ## 常用验证
 

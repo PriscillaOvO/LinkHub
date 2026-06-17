@@ -296,10 +296,30 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_sendFile(
 
 // ── Listener ───────────────────────────────────────────────────────
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::thread::JoinHandle;
 static LISTENER_RUNNING: AtomicBool = AtomicBool::new(false);
 static LISTENER_LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
+/// Monotonic generation for each listener run. A listener worker thread only
+/// clears `LISTENER_RUNNING` on exit if it is still the current generation, so
+/// a stale thread shutting down can never clobber a freshly started listener.
+static LISTENER_EPOCH: AtomicU64 = AtomicU64::new(0);
+/// Join handle of the live listener worker thread, so stop/start can wait for
+/// the previous thread (and its bound socket) to fully release before rebinding.
+static LISTENER_HANDLE: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+
+/// Signals the current listener to stop and blocks until its worker thread has
+/// exited (which drops the bound `TcpListener`, freeing the port). Safe to call
+/// when nothing is running. This is the single choke point that keeps the
+/// `LISTENER_RUNNING` flag and the real socket state consistent.
+fn stop_and_join_listener() {
+    LISTENER_RUNNING.store(false, Ordering::SeqCst);
+    let handle = LISTENER_HANDLE.lock().ok().and_then(|mut h| h.take());
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
+}
 
 #[derive(Serialize)]
 struct JniListenerStatus {
@@ -378,9 +398,14 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_startListener(
     receive_dir: JString,
 ) -> jstring {
     let result = (|| -> Result<String, String> {
-        if LISTENER_RUNNING.load(Ordering::Relaxed) {
+        if LISTENER_RUNNING.load(Ordering::SeqCst) {
             return Ok(r#"{"running":true,"detail":"listener already running"}"#.into());
         }
+        // A previous listener may have been stopped but its worker thread can
+        // still be tearing down (and thus still holding the bound socket). Join
+        // it first so the port is free before we try to rebind; otherwise a
+        // quick stop→start would fail with "address already in use".
+        stop_and_join_listener();
         let json = get_string(&mut env, &identity_json);
         let addr = get_string(&mut env, &bind_addr);
         let ts_path = get_string(&mut env, &trust_store_path);
@@ -405,8 +430,13 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_startListener(
         let on_file_received = make_file_received_callback(vm, class_ref);
 
         set_listener_last_error(None);
-        LISTENER_RUNNING.store(true, Ordering::Relaxed);
-        std::thread::spawn(move || {
+        // Claim a fresh generation for this run. The worker only clears the
+        // RUNNING flag on exit if it is still the current generation, so a
+        // superseded worker that exits late can never turn off a listener that
+        // a later start has since brought up.
+        let my_epoch = LISTENER_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+        LISTENER_RUNNING.store(true, Ordering::SeqCst);
+        let handle = std::thread::spawn(move || {
             let result = crate::run_authenticated_listener_on_with_callback(
                 listener,
                 &addr,
@@ -419,8 +449,13 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_startListener(
             if let Err(err) = result {
                 set_listener_last_error(Some(format!("{err}")));
             }
-            LISTENER_RUNNING.store(false, Ordering::Relaxed);
+            if LISTENER_EPOCH.load(Ordering::SeqCst) == my_epoch {
+                LISTENER_RUNNING.store(false, Ordering::SeqCst);
+            }
         });
+        if let Ok(mut slot) = LISTENER_HANDLE.lock() {
+            *slot = Some(handle);
+        }
         Ok(r#"{"running":true,"detail":"listener started"}"#.into())
     })();
     match result {
@@ -434,7 +469,10 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_stopListener(
     mut env: JNIEnv,
     _class: JClass,
 ) -> jstring {
-    LISTENER_RUNNING.store(false, Ordering::Relaxed);
+    // Block until the worker thread has actually exited and dropped its bound
+    // socket, so a subsequent start can rebind immediately and listenerStatus
+    // reflects the true (fully-stopped) state.
+    stop_and_join_listener();
     make_string(&mut env, r#"{"running":false,"detail":"listener stopped"}"#)
 }
 
