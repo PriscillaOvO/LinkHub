@@ -36,7 +36,6 @@ enum ClientMsg<'a> {
         kind: &'a str,
         payload_hex: &'a str,
     },
-    #[allow(dead_code)]
     Ping,
 }
 
@@ -81,6 +80,40 @@ pub enum SignalingEvent {
     Delivery(SignalingDelivery),
     /// The server reported a non-fatal error for us (e.g. "peer offline").
     ServerError(String),
+}
+
+/// Reconnect policy for [`SignalingClient::connect_with_backoff`]: how many
+/// times to try and how long to wait between tries (exponential backoff, capped).
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    pub base_delay: Duration,
+    pub max_delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 5,
+            base_delay: Duration::from_millis(500),
+            max_delay: Duration::from_secs(10),
+        }
+    }
+}
+
+impl RetryPolicy {
+    /// Backoff delay after the `attempt`-th failure (1-based): `base * 2^(attempt-1)`,
+    /// capped at `max_delay`. Pure — unit-tested without sleeping.
+    pub fn delay_after_attempt(&self, attempt: u32) -> Duration {
+        if attempt == 0 {
+            return Duration::ZERO;
+        }
+        let shift = (attempt - 1).min(31);
+        match self.base_delay.checked_mul(1u32 << shift) {
+            Some(delay) => delay.min(self.max_delay),
+            None => self.max_delay,
+        }
+    }
 }
 
 /// An authenticated, live connection to the signaling server.
@@ -131,6 +164,31 @@ impl SignalingClient {
         })
     }
 
+    /// Like [`Self::connect`] but retries with exponential backoff (for flaky
+    /// networks / a server that is briefly down). Returns the first success or the
+    /// last error after `policy.max_attempts` tries.
+    pub fn connect_with_backoff(
+        url: &str,
+        identity: &LocalIdentity,
+        policy: RetryPolicy,
+    ) -> io::Result<Self> {
+        let attempts = policy.max_attempts.max(1);
+        let mut last_err = None;
+        for attempt in 1..=attempts {
+            match Self::connect(url, identity) {
+                Ok(client) => return Ok(client),
+                Err(err) => {
+                    last_err = Some(err);
+                    if attempt < attempts {
+                        std::thread::sleep(policy.delay_after_attempt(attempt));
+                    }
+                }
+            }
+        }
+        Err(last_err
+            .unwrap_or_else(|| io::Error::other("no signaling connection attempts were made")))
+    }
+
     /// Our own identity public key (how peers address us).
     pub fn public_key_hex(&self) -> &str {
         &self.public_key_hex
@@ -146,6 +204,14 @@ impl SignalingClient {
             MaybeTlsStream::Plain(stream) => stream.set_read_timeout(timeout),
             _ => Ok(()),
         }
+    }
+
+    /// Send a heartbeat ping. The server replies with a pong, which
+    /// [`Self::recv`] consumes transparently; sending this periodically keeps the
+    /// connection (and any NAT mapping) alive and surfaces a dead link as a write
+    /// error.
+    pub fn ping(&mut self) -> io::Result<()> {
+        send_json(&mut self.ws, &ClientMsg::Ping)
     }
 
     /// Relay a signaling payload to `to_public_key_hex` via the server.
@@ -248,4 +314,47 @@ fn unexpected(expected: &str, got: &ServerMsg) -> io::Error {
         io::ErrorKind::InvalidData,
         format!("expected {expected}, received {got:?}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backoff_grows_exponentially_and_caps() {
+        let policy = RetryPolicy {
+            max_attempts: 6,
+            base_delay: Duration::from_millis(100),
+            max_delay: Duration::from_secs(1),
+        };
+        assert_eq!(policy.delay_after_attempt(1), Duration::from_millis(100));
+        assert_eq!(policy.delay_after_attempt(2), Duration::from_millis(200));
+        assert_eq!(policy.delay_after_attempt(3), Duration::from_millis(400));
+        assert_eq!(policy.delay_after_attempt(4), Duration::from_millis(800));
+        // 1600ms would exceed the 1s cap.
+        assert_eq!(policy.delay_after_attempt(5), Duration::from_secs(1));
+        assert_eq!(policy.delay_after_attempt(50), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn backoff_of_zero_attempt_is_zero() {
+        assert_eq!(
+            RetryPolicy::default().delay_after_attempt(0),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn connect_with_backoff_gives_up_after_max_attempts() {
+        let identity = LocalIdentity::generate("Tester", std::time::SystemTime::UNIX_EPOCH);
+        // Port 1 is privileged/closed; connect must fail fast. Tiny delays keep
+        // the test quick while still exercising the retry loop.
+        let policy = RetryPolicy {
+            max_attempts: 3,
+            base_delay: Duration::from_millis(1),
+            max_delay: Duration::from_millis(2),
+        };
+        let result = SignalingClient::connect_with_backoff("ws://127.0.0.1:1", &identity, policy);
+        assert!(result.is_err());
+    }
 }

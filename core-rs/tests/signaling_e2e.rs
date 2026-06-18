@@ -8,7 +8,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use linkhub_core::{LocalIdentity, SignalingClient, SignalingEvent};
+use linkhub_core::{LocalIdentity, RetryPolicy, SignalingClient, SignalingEvent};
 
 /// Spin up the signaling server on an ephemeral port in its own tokio runtime
 /// thread; return the `ws://` URL once it is listening.
@@ -86,6 +86,53 @@ fn relay_to_offline_peer_reports_server_error() {
         }
         other => panic!("expected server error, got {other:?}"),
     }
+}
+
+#[test]
+fn connect_with_backoff_succeeds_against_live_server_and_heartbeat_keeps_link() {
+    let url = start_server();
+    let now = SystemTime::now();
+    let alice = LocalIdentity::generate("Alice", now);
+    let bob = LocalIdentity::generate("Bob", now);
+
+    // Reconnecting client comes up on the first try against a live server.
+    let mut bob_client =
+        SignalingClient::connect_with_backoff(&url, &bob, RetryPolicy::default()).expect("bob");
+    bob_client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+
+    // Heartbeat: ping must not disturb the session — a subsequent relay still
+    // arrives (the pong is consumed transparently by recv()).
+    bob_client.ping().expect("bob heartbeat ping");
+
+    let mut alice_client = SignalingClient::connect(&url, &alice).expect("alice connects");
+    alice_client.ping().expect("alice heartbeat ping");
+    alice_client
+        .send_signaling(bob.public_key(), "sess-hb", "offer", "feed")
+        .expect("alice relays after ping");
+
+    match bob_client.recv().expect("bob receives after ping") {
+        SignalingEvent::Delivery(delivery) => {
+            assert_eq!(delivery.session_id, "sess-hb");
+            assert_eq!(delivery.payload_hex, "feed");
+        }
+        other => panic!("expected delivery after heartbeat, got {other:?}"),
+    }
+}
+
+#[test]
+fn connect_with_backoff_gives_up_when_server_is_down() {
+    let now = SystemTime::now();
+    let alice = LocalIdentity::generate("Alice", now);
+    // Nothing is listening here; fast, few attempts so the test stays quick.
+    let policy = RetryPolicy {
+        max_attempts: 3,
+        base_delay: Duration::from_millis(1),
+        max_delay: Duration::from_millis(2),
+    };
+    let result = SignalingClient::connect_with_backoff("ws://127.0.0.1:1", &alice, policy);
+    assert!(result.is_err(), "should fail when no server is reachable");
 }
 
 #[test]

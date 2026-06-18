@@ -14,16 +14,20 @@
 //! whom, when). See `docs/spec/设计-跨网络传输-webrtc.md` §5/§7.
 
 pub mod auth;
+pub mod limits;
 pub mod protocol;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
+use limits::{Limits, RateLimiter};
 use protocol::{ClientMsg, ServerMsg};
 
 /// Presence table: identity public key (hex) -> channel into that device's
@@ -33,12 +37,18 @@ type Registry = Arc<Mutex<HashMap<String, UnboundedSender<ServerMsg>>>>;
 /// Accept connections forever, handling each in its own task. Returns only on
 /// listener error.
 pub async fn serve(listener: TcpListener) -> std::io::Result<()> {
+    serve_with_limits(listener, Limits::default()).await
+}
+
+/// Like [`serve`] but with explicit abuse [`Limits`] (used by tests to make the
+/// caps tight enough to trip deterministically).
+pub async fn serve_with_limits(listener: TcpListener, limits: Limits) -> std::io::Result<()> {
     let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
     loop {
         let (stream, _peer) = listener.accept().await?;
         let registry = Arc::clone(&registry);
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, registry).await {
+            if let Err(err) = handle_connection(stream, registry, limits).await {
                 // Per-connection errors are expected (clients drop, send junk);
                 // log and move on, never take down the server.
                 eprintln!("connection ended: {err}");
@@ -47,8 +57,19 @@ pub async fn serve(listener: TcpListener) -> std::io::Result<()> {
     }
 }
 
-async fn handle_connection(stream: TcpStream, registry: Registry) -> Result<(), String> {
-    let ws = tokio_tungstenite::accept_async(stream)
+async fn handle_connection(
+    stream: TcpStream,
+    registry: Registry,
+    limits: Limits,
+) -> Result<(), String> {
+    // Cap inbound frame/message size at the protocol layer so a single peer can't
+    // exhaust memory with a giant frame (design §7 抗滥用).
+    let ws_config = WebSocketConfig {
+        max_message_size: Some(limits.max_message_bytes),
+        max_frame_size: Some(limits.max_message_bytes),
+        ..Default::default()
+    };
+    let ws = tokio_tungstenite::accept_async_with_config(stream, Some(ws_config))
         .await
         .map_err(|e| format!("ws handshake failed: {e}"))?;
     let (mut ws_tx, mut ws_rx) = ws.split();
@@ -107,6 +128,7 @@ async fn handle_connection(stream: TcpStream, registry: Registry) -> Result<(), 
     .await?;
 
     // 4. Pump: outbound queue -> socket, and inbound socket -> routing.
+    let mut rate_limiter = RateLimiter::from_limits(&limits, Instant::now());
     let result = loop {
         tokio::select! {
             outbound = self_rx.recv() => match outbound {
@@ -123,12 +145,25 @@ async fn handle_connection(stream: TcpStream, registry: Registry) -> Result<(), 
                 Some(Ok(Message::Close(_))) => break Ok(()),
                 Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
                 Some(Ok(msg)) => {
+                    // Flood protection: a connection over the message-rate limit is
+                    // dropped (design §7 抗滥用). Tell it once, then close.
+                    if !rate_limiter.allow(Instant::now()) {
+                        let _ = send_ws(
+                            &mut ws_tx,
+                            &ServerMsg::Error {
+                                reason: "rate limit exceeded".to_string(),
+                            },
+                        )
+                        .await;
+                        break Err("rate limit exceeded".to_string());
+                    }
                     if let Err(e) = handle_client_msg(
                         msg,
                         &public_key_hex,
                         &device_id,
                         &registry,
                         &self_tx,
+                        &limits,
                     ) {
                         // Bad frame from this client: tell it, keep the session.
                         let _ = self_tx.send(ServerMsg::Error { reason: e });
@@ -150,6 +185,7 @@ fn handle_client_msg(
     from_device_id: &str,
     registry: &Registry,
     self_tx: &UnboundedSender<ServerMsg>,
+    limits: &Limits,
 ) -> Result<(), String> {
     match parse_client(&msg)? {
         ClientMsg::Ping => {
@@ -163,6 +199,11 @@ fn handle_client_msg(
             kind,
             payload_hex,
         } => {
+            // Reject oversized payloads with a clean error (the protocol-layer
+            // frame cap is the hard backstop; this is the graceful one).
+            if payload_hex.len() > limits.max_payload_hex_len {
+                return Err("signaling payload too large".to_string());
+            }
             let target = registry.lock().unwrap().get(&to_public_key_hex).cloned();
             match target {
                 Some(peer) => {

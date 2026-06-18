@@ -8,6 +8,7 @@ use std::time::Duration;
 use ed25519_dalek::{Signer, SigningKey};
 use futures_util::{SinkExt, StreamExt};
 use linkhub_signaling_server::auth::challenge_string;
+use linkhub_signaling_server::limits::Limits;
 use linkhub_signaling_server::protocol::{ClientMsg, ServerMsg};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -16,10 +17,14 @@ use tokio_tungstenite::WebSocketStream;
 type Ws = WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn start_server() -> String {
+    start_server_with_limits(Limits::default()).await
+}
+
+async fn start_server_with_limits(limits: Limits) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        let _ = linkhub_signaling_server::serve(listener).await;
+        let _ = linkhub_signaling_server::serve_with_limits(listener, limits).await;
     });
     format!("ws://{addr}")
 }
@@ -150,6 +155,70 @@ async fn ping_is_answered_with_pong() {
         ServerMsg::Pong => {}
         other => panic!("expected pong, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn oversized_payload_is_rejected() {
+    let limits = Limits {
+        max_payload_hex_len: 16,
+        ..Limits::default()
+    };
+    let url = start_server_with_limits(limits).await;
+    let sk = key_from_seed(7);
+    let absent = key_from_seed(8);
+    let mut ws = connect_and_login(&url, &sk, "lh-big").await;
+
+    let forward = ClientMsg::Forward {
+        to_public_key_hex: pubkey_hex(&absent),
+        session_id: "sess-big".to_string(),
+        kind: "offer".to_string(),
+        payload_hex: "ab".repeat(64), // 128 hex chars, over the 16-char cap
+    };
+    ws.send(Message::Text(forward.to_json())).await.unwrap();
+
+    match next_server_msg(&mut ws).await {
+        ServerMsg::Error { reason } => assert!(reason.contains("too large"), "reason: {reason}"),
+        other => panic!("expected payload-too-large error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn message_flood_is_rate_limited_and_dropped() {
+    // Tight limit, wide window so all messages land in the same window.
+    let limits = Limits {
+        rate_max_messages: 3,
+        rate_window: Duration::from_secs(30),
+        ..Limits::default()
+    };
+    let url = start_server_with_limits(limits).await;
+    let sk = key_from_seed(9);
+    let mut ws = connect_and_login(&url, &sk, "lh-flood").await;
+
+    // Send well past the limit; the first few Pings are answered, then the
+    // server emits a rate-limit error and closes.
+    for _ in 0..10 {
+        ws.send(Message::Text(ClientMsg::Ping.to_json()))
+            .await
+            .unwrap();
+    }
+
+    let mut saw_rate_limit = false;
+    for _ in 0..12 {
+        let frame = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
+        match frame {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                if let Ok(ServerMsg::Error { reason }) = ServerMsg::from_json(&text) {
+                    assert!(reason.contains("rate limit"), "reason: {reason}");
+                    saw_rate_limit = true;
+                    break;
+                }
+            }
+            // Connection closed right after the error is also acceptable.
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => break,
+            _ => continue,
+        }
+    }
+    assert!(saw_rate_limit, "expected a rate-limit error before close");
 }
 
 #[tokio::test]

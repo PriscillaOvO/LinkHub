@@ -41,7 +41,7 @@ pub use connection_plan::{
     attempt_with_fallback, plan_connection, preferred_established_route, ConnectionPath,
     ConnectionPlan, PeerReachability,
 };
-pub use signaling_client::{SignalingClient, SignalingDelivery, SignalingEvent};
+pub use signaling_client::{RetryPolicy, SignalingClient, SignalingDelivery, SignalingEvent};
 pub use signaling_signed::{open_sdp, seal_sdp, verify_signaling_sdp};
 
 const RECEIVED_DIR: &str = "received";
