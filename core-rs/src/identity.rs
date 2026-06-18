@@ -29,6 +29,7 @@ const SECURE_LOCAL_IDENTITY_PLATFORM_WINDOWS_DPAPI: &str = "windows-dpapi-user";
 const SECURE_LOCAL_IDENTITY_PLATFORM_MACOS_KEYCHAIN: &str = "macos-keychain";
 const SECURE_LOCAL_IDENTITY_PLATFORM_LINUX_SECRET_SERVICE: &str = "linux-secret-service";
 const HANDSHAKE_CHALLENGE_HEADER: &str = "linkhub-auth-v1";
+const SIGNALING_SDP_HEADER: &str = "linkhub-signaling-sdp-v1";
 const PAIRING_PAYLOAD_HEADER: &str = "linkhub-pair-v2";
 const TRUST_STORE_HEADER: &str = "linkhub_trust_store_v1";
 
@@ -50,6 +51,25 @@ pub fn handshake_challenge(signer_device_id: &str, peer_device_id: &str, nonce: 
         peer_device_id.trim(),
         nonce.trim()
     )
+}
+
+/// Domain-separated bytes a device signs over a WebRTC SDP signal so a malicious
+/// signaling server cannot tamper with or substitute the offer/answer it relays
+/// (connection-redirection, design §7). Binds the SDP to its session id and role
+/// ("offer"/"answer"); the dedicated header keeps it distinct from
+/// [`handshake_challenge`] and the signaling-login domain so a signature gathered
+/// here can never be replayed as another protocol's. Pairs with
+/// [`crate::net::verify_signaling_sdp`] — keep the two byte-for-byte in sync.
+pub(crate) fn signaling_sdp_message(session_id: &str, kind: &str, sdp: &str) -> Vec<u8> {
+    let mut message = Vec::new();
+    message.extend_from_slice(SIGNALING_SDP_HEADER.as_bytes());
+    message.push(0);
+    message.extend_from_slice(session_id.trim().as_bytes());
+    message.push(0);
+    message.extend_from_slice(kind.trim().as_bytes());
+    message.push(0);
+    message.extend_from_slice(sdp.as_bytes());
+    message
 }
 
 fn grouped_uppercase(value: &str, group_len: usize) -> String {

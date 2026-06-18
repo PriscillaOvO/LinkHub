@@ -1342,6 +1342,7 @@ fn start_webrtc_signaling_bridge(
         loop {
             drain_outbound_sdp(
                 &mut client,
+                &identity,
                 &mut outbound_sdp,
                 active_session_id.as_deref(),
                 target_public_key_hex.as_deref(),
@@ -1394,6 +1395,7 @@ fn start_webrtc_signaling_bridge(
 #[cfg(feature = "webrtc")]
 fn drain_outbound_sdp(
     client: &mut SignalingClient,
+    identity: &LocalIdentity,
     outbound_sdp: &mut tokio::sync::mpsc::UnboundedReceiver<SdpSignal>,
     session_id: Option<&str>,
     target_public_key_hex: Option<&str>,
@@ -1406,7 +1408,10 @@ fn drain_outbound_sdp(
                 let target_public_key_hex = target_public_key_hex
                     .ok_or_else(|| "no signaling target public key".to_string())?;
                 let kind = if signal.is_offer { "offer" } else { "answer" };
-                let payload_hex = hex_encode(signal.sdp.as_bytes());
+                // T3: sign the SDP with our identity key so the peer can detect a
+                // server tampering with / substituting it (design §7).
+                let payload_hex = linkhub_core::seal_sdp(identity, session_id, kind, &signal.sdp)
+                    .map_err(|err| format!("failed to sign WebRTC {kind}: {err}"))?;
                 client
                     .send_signaling(target_public_key_hex, session_id, kind, &payload_hex)
                     .map_err(|err| format!("failed to relay WebRTC {kind}: {err}"))?;
@@ -1459,9 +1464,17 @@ fn accept_signaling_delivery(
 
 #[cfg(feature = "webrtc")]
 fn delivery_to_sdp_signal(delivery: &linkhub_core::SignalingDelivery) -> Result<SdpSignal, String> {
-    let bytes = linkhub_core::decode_hex(&delivery.payload_hex)
-        .map_err(|err| format!("invalid SDP payload hex: {err}"))?;
-    let sdp = String::from_utf8(bytes).map_err(|err| format!("invalid SDP UTF-8: {err}"))?;
+    // T3: verify the SDP was signed by the peer identity key we already vetted in
+    // `accept_signaling_delivery` (initiator: the target peer; responder: a
+    // trusted device), bound to this session and role. Rejects a server that
+    // tampered with or substituted the SDP (design §7).
+    let sdp = linkhub_core::open_sdp(
+        &delivery.from_public_key_hex,
+        &delivery.session_id,
+        &delivery.kind,
+        &delivery.payload_hex,
+    )
+    .map_err(|err| format!("rejected unsigned/tampered WebRTC {}: {err}", delivery.kind))?;
 
     Ok(SdpSignal {
         is_offer: delivery.kind == "offer",
@@ -1525,11 +1538,6 @@ fn dh_key_from_identity(identity: &DeviceIdentity) -> Result<[u8; 32], String> {
     dh_bytes
         .try_into()
         .map_err(|bytes: Vec<u8>| format!("peer dh key must be 32 bytes, got {}", bytes.len()))
-}
-
-#[cfg(feature = "webrtc")]
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(feature = "webrtc")]

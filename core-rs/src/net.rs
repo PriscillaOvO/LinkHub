@@ -16,6 +16,7 @@ mod file_transfer;
 mod protocol;
 mod session;
 mod signaling_client;
+mod signaling_signed;
 #[cfg(feature = "webrtc")]
 pub mod webrtc_transport;
 
@@ -41,6 +42,7 @@ pub use connection_plan::{
     ConnectionPlan, PeerReachability,
 };
 pub use signaling_client::{SignalingClient, SignalingDelivery, SignalingEvent};
+pub use signaling_signed::{open_sdp, seal_sdp, verify_signaling_sdp};
 
 const RECEIVED_DIR: &str = "received";
 

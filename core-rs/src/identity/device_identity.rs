@@ -18,7 +18,7 @@ use super::secure_store::{
 };
 use super::{
     decode_hex, decode_hex_string, encode_hex, grouped_uppercase, handshake_challenge, sha256_hex,
-    system_time_to_unix_seconds, LOCAL_IDENTITY_HEADER,
+    signaling_sdp_message, system_time_to_unix_seconds, LOCAL_IDENTITY_HEADER,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -274,6 +274,25 @@ impl LocalIdentity {
         let signing_key = SigningKey::from_bytes(&signing_key_bytes);
         let challenge = format!("linkhub-signaling-auth-v1\0{}", nonce.trim());
         let signature = signing_key.sign(challenge.as_bytes());
+
+        Ok(encode_hex(&signature.to_bytes()))
+    }
+
+    /// Sign a WebRTC SDP signal (offer/answer) with this device's identity key so
+    /// the receiving peer can detect a signaling server tampering with or
+    /// substituting the SDP it forwards (connection-redirection, design §7).
+    /// Domain-separated from handshake and login signatures (see
+    /// [`super::signaling_sdp_message`]); pairs with
+    /// [`crate::net::verify_signaling_sdp`] / [`crate::net::seal_sdp`].
+    pub fn sign_signaling_sdp(
+        &self,
+        session_id: &str,
+        kind: &str,
+        sdp: &str,
+    ) -> Result<String, String> {
+        let signing_key_bytes = hex_array::<32>(&self.signing_key_hex)?;
+        let signing_key = SigningKey::from_bytes(&signing_key_bytes);
+        let signature = signing_key.sign(&signaling_sdp_message(session_id, kind, sdp));
 
         Ok(encode_hex(&signature.to_bytes()))
     }
