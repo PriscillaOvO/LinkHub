@@ -18,6 +18,8 @@ mod session;
 mod signaling_client;
 mod signaling_signed;
 #[cfg(feature = "webrtc")]
+pub mod webrtc_session;
+#[cfg(feature = "webrtc")]
 pub mod webrtc_transport;
 
 use ack::{

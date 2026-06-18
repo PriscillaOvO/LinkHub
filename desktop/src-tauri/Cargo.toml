@@ -3,6 +3,12 @@ name = "linkhub-desktop"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Cross-network WebRTC transport (Stage 5). Off by default so the standard
+# desktop build / CI `cargo check` stays lean; build with `--features webrtc`
+# (and a running signaling server) to enable the cross-network commands.
+webrtc = ["linkhub-core-prototype/webrtc"]
+
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"

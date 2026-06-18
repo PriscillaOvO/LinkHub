@@ -55,6 +55,46 @@ function buildSendTab() {
       </div>
       <button class="btn btn-primary" data-act="sendFile">发送文件</button>
     </div>
+
+    <div class="card">
+      <h3>跨网络传输 (WebRTC)</h3>
+      <p class="hint">两台已配对设备在不同网络间，经信令服务器打洞 / 中继端到端加密传输。需先运行 signaling-server，且双方都在线。</p>
+      <div class="form-group">
+        <label>信令服务器</label>
+        <input type="text" id="wrtc-signaling" placeholder="ws://127.0.0.1:9000" value="ws://127.0.0.1:9000">
+      </div>
+      <div class="form-group">
+        <label>STUN / TURN URL（可选，逗号或换行分隔）</label>
+        <input type="text" id="wrtc-ice" placeholder="stun:stun.l.google.com:19302, turn:turn.example.com:3478">
+      </div>
+      <div class="form-group">
+        <label>TURN 凭证与中继（可选）</label>
+        <div class="inline-row">
+          <input type="text" id="wrtc-turn-user" placeholder="TURN 用户名">
+          <input type="text" id="wrtc-turn-cred" placeholder="TURN 凭证">
+          <label class="inline-check"><input type="checkbox" id="wrtc-relay-only"> 仅走中继</label>
+        </div>
+      </div>
+      <div class="form-group">
+        <label>目标设备</label>
+        <select id="wrtc-device-select">
+          <option value="">-- 请先加载设备列表 --</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>文件路径</label>
+        <div class="inline-row">
+          <input type="text" id="wrtc-file-path" placeholder="C:\\path\\to\\file">
+          <button class="btn btn-secondary" data-act="chooseFileForWebrtc">浏览…</button>
+        </div>
+      </div>
+      <div class="inline-row">
+        <button class="btn btn-primary" data-act="webrtcSendFile">跨网络发送文件</button>
+        <button class="btn btn-secondary" data-act="webrtcReceiveOnce">监听一次接收</button>
+        <button class="btn btn-secondary" data-act="previewConnectionPlan">查看连接路径</button>
+      </div>
+      <div id="wrtc-plan" class="hint"></div>
+    </div>
     <div id="send-msg"></div>
   `;
 }
@@ -82,6 +122,8 @@ async function renderSendTab() {
 
     document.getElementById('send-device-select').innerHTML = opts;
     document.getElementById('send-file-device-select').innerHTML = opts;
+    const wrtcSelect = document.getElementById('wrtc-device-select');
+    if (wrtcSelect) wrtcSelect.innerHTML = opts;
     applyPendingSendSelection();
   } catch (err) {
     showMessage('send-msg', '加载设备失败：' + err.message, 'error');
@@ -235,6 +277,106 @@ async function sendFile() {
     setStatus('文件已发送', 'ok');
   } catch (err) {
     showMessage('send-msg', '错误：' + err.message, 'error');
+  }
+}
+
+// ── Cross-network (WebRTC) ─────────────────────────────────────────
+
+async function chooseFileForWebrtc() {
+  try {
+    const path = await tauriInvoke('choose_file_path');
+    if (path) {
+      document.getElementById('wrtc-file-path').value = path;
+      setStatus('已选择文件', 'ok');
+    }
+  } catch (err) {
+    showMessage('send-msg', '文件选择出错：' + err.message, 'error');
+  }
+}
+
+// Parse the shared ICE/TURN inputs into the args the Rust commands expect.
+function webrtcIceArgs() {
+  const ice = document.getElementById('wrtc-ice').value.trim();
+  const iceUrls = ice ? ice.split(/[\n,]+/).map(s => s.trim()).filter(Boolean) : [];
+  return {
+    iceUrls,
+    turnUsername: document.getElementById('wrtc-turn-user').value.trim() || null,
+    turnCredential: document.getElementById('wrtc-turn-cred').value.trim() || null,
+    relayOnly: document.getElementById('wrtc-relay-only').checked,
+  };
+}
+
+async function webrtcSendFile() {
+  const identityPath = getSetting('identityPath');
+  const trustStorePath = getSetting('trustStorePath');
+  const historyPath = getSetting('historyPath');
+  const signalingUrl = document.getElementById('wrtc-signaling').value.trim();
+  const peerDeviceId = document.getElementById('wrtc-device-select').value;
+  const filePath = document.getElementById('wrtc-file-path').value.trim();
+  if (!signalingUrl || !peerDeviceId || !filePath) {
+    showMessage('send-msg', '请填写信令服务器、目标设备和文件路径', 'error');
+    return;
+  }
+  const ice = webrtcIceArgs();
+  setStatus('正在建立跨网络连接并发送…', 'info');
+  try {
+    const result = await tauriInvoke('webrtc_send_file', {
+      signalingUrl, identityPath, peerDeviceId, trustStorePath, historyPath, filePath,
+      iceUrls: ice.iceUrls, turnUsername: ice.turnUsername,
+      turnCredential: ice.turnCredential, relayOnly: ice.relayOnly,
+    });
+    showMessage('send-msg', result.detail, 'success');
+    setStatus('跨网络发送完成', 'ok');
+  } catch (err) {
+    showMessage('send-msg', '跨网络发送错误：' + err.message, 'error');
+    setStatus('跨网络发送失败', 'error');
+  }
+}
+
+async function webrtcReceiveOnce() {
+  const identityPath = getSetting('identityPath');
+  const trustStorePath = getSetting('trustStorePath');
+  const receiveDir = getSetting('receiveDir');
+  const signalingUrl = document.getElementById('wrtc-signaling').value.trim();
+  if (!signalingUrl) {
+    showMessage('send-msg', '请填写信令服务器', 'error');
+    return;
+  }
+  const ice = webrtcIceArgs();
+  setStatus('正在等待跨网络接收（监听一次）…', 'info');
+  try {
+    const result = await tauriInvoke('webrtc_receive_file', {
+      signalingUrl, identityPath, trustStorePath, receiveDir,
+      iceUrls: ice.iceUrls, turnUsername: ice.turnUsername,
+      turnCredential: ice.turnCredential, relayOnly: ice.relayOnly,
+    });
+    showMessage('send-msg', result.detail, 'success');
+    setStatus('跨网络接收完成', 'ok');
+  } catch (err) {
+    showMessage('send-msg', '跨网络接收错误：' + err.message, 'error');
+    setStatus('跨网络接收失败', 'error');
+  }
+}
+
+// Show which transport path a transfer would take (LAN 直连 → 打洞 → 中继).
+async function previewConnectionPlan() {
+  const peerDeviceId = document.getElementById('wrtc-device-select').value;
+  const lanAddr = peerDeviceId ? (getPeerAddress(peerDeviceId) || '') : '';
+  const signalingAvailable = document.getElementById('wrtc-signaling').value.trim() !== '';
+  const ice = webrtcIceArgs();
+  const relayAvailable = ice.iceUrls.some(u => u.startsWith('turn:') || u.startsWith('turns:'));
+  try {
+    const paths = await tauriInvoke('connection_plan', { lanAddr, signalingAvailable, relayAvailable });
+    const el = document.getElementById('wrtc-plan');
+    if (!paths.length) {
+      el.textContent = '当前无可达路径（请填写信令服务器，或先在局域网扫描到对端地址）。';
+      return;
+    }
+    el.innerHTML = '连接尝试顺序：' + paths.map((p, i) =>
+      `${i + 1}. ${escHtml(p.label)}${p.detail ? ' (' + escHtml(p.detail) + ')' : ''}`
+    ).join('  →  ');
+  } catch (err) {
+    showMessage('send-msg', '获取连接路径出错：' + err.message, 'error');
   }
 }
 

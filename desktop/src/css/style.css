@@ -117,6 +117,10 @@ main {
 }
 .inline-row input { flex: 1; min-width: 0; }
 .inline-row .btn { white-space: nowrap; }
+.inline-check { display: flex; align-items: center; gap: 4px; white-space: nowrap; font-size: 0.85rem; }
+.inline-check input { flex: 0 0 auto; }
+
+.hint { font-size: 0.85rem; color: var(--text-muted, #8a8aa0); margin: 4px 0 10px; line-height: 1.5; }
 
 .hint-row {
   display: flex;

@@ -7,12 +7,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "webrtc")]
-use std::io::{BufReader, Write as _};
+use std::io::Write as _;
 #[cfg(feature = "webrtc")]
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::Arc;
 
 use linkhub_core::{
     new_handshake_nonce, run_authenticated_file_sender,
@@ -25,9 +22,7 @@ use linkhub_core::{
 };
 
 #[cfg(feature = "webrtc")]
-use linkhub_core::net::webrtc_transport::{
-    accept_responder, connect_initiator, IceConfig, IceServer, SdpSignal,
-};
+use linkhub_core::net::webrtc_transport::{IceConfig, IceServer};
 
 fn main() -> ExitCode {
     match run() {
@@ -1203,13 +1198,11 @@ fn run_connect_webrtc_command(args: &[String]) -> Result<(), String> {
         )
     })?;
     let peer_identity = lookup_peer_identity(&trust_store, &parsed.peer_device_id)?;
-    let peer_dh_key_bytes = dh_key_from_identity(&peer_identity)?;
 
     run_connect_webrtc(
         &parsed.ws_url,
         identity,
         peer_identity,
-        peer_dh_key_bytes,
         parsed.path,
         parsed.ice,
     )
@@ -1220,55 +1213,29 @@ fn run_connect_webrtc(
     ws_url: &str,
     identity: LocalIdentity,
     peer_identity: DeviceIdentity,
-    peer_dh_public_key: [u8; 32],
     path: String,
     ice: IceConfig,
 ) -> Result<(), String> {
-    let runtime = new_webrtc_runtime()?;
-    let handle = runtime.handle().clone();
-    let session_id = new_webrtc_session_id(identity.device_id());
-    let (local_sdp_tx, local_sdp_rx) = tokio::sync::mpsc::unbounded_channel::<SdpSignal>();
-    let (remote_sdp_tx, remote_sdp_rx) = tokio::sync::mpsc::unbounded_channel::<SdpSignal>();
-    let bridge = start_webrtc_signaling_bridge(
-        ws_url.to_string(),
-        identity.clone(),
-        WebRtcSignalingRole::Initiator {
-            peer_public_key_hex: peer_identity.public_key().to_string(),
-            session_id: session_id.clone(),
-        },
-        local_sdp_rx,
-        remote_sdp_tx,
-    )?;
-
     println!(
-        "WebRTC initiator present as device_id={} session={} target_device_id={}",
+        "WebRTC initiator present as device_id={} target_device_id={}; establishing...",
         identity.device_id(),
-        session_id,
         peer_identity.device_id()
     );
     let _ = std::io::stdout().flush();
 
-    let established = runtime.block_on(connect_initiator(ice, local_sdp_tx, remote_sdp_rx, handle));
-    let bridge_result = bridge.stop();
-    let duplex = finish_webrtc_establishment(established, bridge_result)?;
-
-    println!(
-        "WebRTC DataChannel established; sending authenticated file to {}",
-        peer_identity.device_id()
-    );
-    let writer = duplex.clone();
-    let reader = BufReader::new(duplex.clone());
-    linkhub_core::run_authenticated_file_sender_over(
-        writer,
-        reader,
+    linkhub_core::net::webrtc_session::send_file_over_webrtc(
+        ws_url,
         &identity,
-        peer_identity.device_id(),
-        &peer_dh_public_key,
-        path,
+        &peer_identity,
+        ice,
+        &path,
     )
     .map_err(|err| format!("failed to send authenticated file over WebRTC: {err}"))?;
-    duplex.close();
 
+    println!(
+        "WebRTC file sent to {} and acknowledged",
+        peer_identity.device_id()
+    );
     Ok(())
 }
 
@@ -1280,20 +1247,6 @@ fn run_listen_webrtc(
     receive_dir: String,
     ice: IceConfig,
 ) -> Result<(), String> {
-    let runtime = new_webrtc_runtime()?;
-    let handle = runtime.handle().clone();
-    let (local_sdp_tx, local_sdp_rx) = tokio::sync::mpsc::unbounded_channel::<SdpSignal>();
-    let (remote_sdp_tx, remote_sdp_rx) = tokio::sync::mpsc::unbounded_channel::<SdpSignal>();
-    let bridge = start_webrtc_signaling_bridge(
-        ws_url.to_string(),
-        identity.clone(),
-        WebRtcSignalingRole::Responder {
-            trust_store: Arc::clone(&trust_store),
-        },
-        local_sdp_rx,
-        remote_sdp_tx,
-    )?;
-
     println!(
         "WebRTC listener present as device_id={} public_key={}",
         identity.device_id(),
@@ -1302,275 +1255,18 @@ fn run_listen_webrtc(
     println!("Waiting for a trusted WebRTC offer...");
     let _ = std::io::stdout().flush();
 
-    let established = runtime.block_on(accept_responder(ice, local_sdp_tx, remote_sdp_rx, handle));
-    let bridge_result = bridge.stop();
-    let duplex = finish_webrtc_establishment(established, bridge_result)?;
-
-    println!(
-        "WebRTC DataChannel established; receiving authenticated frames into {}",
-        receive_dir
-    );
-    let writer = duplex.clone();
-    let reader = BufReader::new(duplex.clone());
-    let result = linkhub_core::run_authenticated_responder_over(
-        writer,
-        reader,
+    linkhub_core::net::webrtc_session::receive_file_over_webrtc(
+        ws_url,
         identity,
         trust_store,
-        receive_dir,
+        &receive_dir,
+        ice,
         None,
     )
-    .map_err(|err| format!("authenticated WebRTC responder failed: {err}"));
-    duplex.close();
-    result
-}
+    .map_err(|err| format!("authenticated WebRTC responder failed: {err}"))?;
 
-#[cfg(feature = "webrtc")]
-enum WebRtcSignalingRole {
-    Initiator {
-        peer_public_key_hex: String,
-        session_id: String,
-    },
-    Responder {
-        trust_store: Arc<TrustStore>,
-    },
-}
-
-#[cfg(feature = "webrtc")]
-struct RunningSignalingBridge {
-    stop: Arc<AtomicBool>,
-    handle: thread::JoinHandle<Result<(), String>>,
-}
-
-#[cfg(feature = "webrtc")]
-impl RunningSignalingBridge {
-    fn stop(self) -> Result<(), String> {
-        self.stop.store(true, Ordering::Relaxed);
-        self.handle
-            .join()
-            .map_err(|_| "signaling bridge thread panicked".to_string())?
-    }
-}
-
-#[cfg(feature = "webrtc")]
-fn start_webrtc_signaling_bridge(
-    ws_url: String,
-    identity: LocalIdentity,
-    role: WebRtcSignalingRole,
-    mut outbound_sdp: tokio::sync::mpsc::UnboundedReceiver<SdpSignal>,
-    inbound_sdp: tokio::sync::mpsc::UnboundedSender<SdpSignal>,
-) -> Result<RunningSignalingBridge, String> {
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_for_thread = Arc::clone(&stop);
-    let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<(), String>>();
-
-    let handle = thread::spawn(move || {
-        let mut client = match SignalingClient::connect(&ws_url, &identity) {
-            Ok(client) => client,
-            Err(err) => {
-                let message = format!("failed to connect to signaling server {ws_url}: {err}");
-                let _ = ready_tx.send(Err(message.clone()));
-                return Err(message);
-            }
-        };
-        if let Err(err) = client.set_read_timeout(Some(Duration::from_millis(100))) {
-            let message = format!("failed to configure signaling read timeout: {err}");
-            let _ = ready_tx.send(Err(message.clone()));
-            return Err(message);
-        }
-        let _ = ready_tx.send(Ok(()));
-
-        let mut active_session_id = match &role {
-            WebRtcSignalingRole::Initiator { session_id, .. } => Some(session_id.clone()),
-            WebRtcSignalingRole::Responder { .. } => None,
-        };
-        let mut target_public_key_hex = match &role {
-            WebRtcSignalingRole::Initiator {
-                peer_public_key_hex,
-                ..
-            } => Some(peer_public_key_hex.clone()),
-            WebRtcSignalingRole::Responder { .. } => None,
-        };
-
-        loop {
-            drain_outbound_sdp(
-                &mut client,
-                &identity,
-                &mut outbound_sdp,
-                active_session_id.as_deref(),
-                target_public_key_hex.as_deref(),
-            )?;
-
-            if stop_for_thread.load(Ordering::Relaxed) {
-                client.close();
-                return Ok(());
-            }
-
-            match client.recv() {
-                Ok(SignalingEvent::Delivery(delivery)) => {
-                    if !accept_signaling_delivery(
-                        &role,
-                        &delivery,
-                        &mut active_session_id,
-                        &mut target_public_key_hex,
-                    ) {
-                        continue;
-                    }
-
-                    let signal = delivery_to_sdp_signal(&delivery)?;
-                    inbound_sdp
-                        .send(signal)
-                        .map_err(|_| "WebRTC SDP receiver closed".to_string())?;
-                }
-                Ok(SignalingEvent::ServerError(reason)) => {
-                    return Err(format!("signaling server error: {reason}"));
-                }
-                Err(err) if is_poll_timeout(&err) => continue,
-                Err(err) => return Err(format!("signaling connection ended: {err}")),
-            }
-        }
-    });
-
-    match ready_rx.recv_timeout(Duration::from_secs(5)) {
-        Ok(Ok(())) => Ok(RunningSignalingBridge { stop, handle }),
-        Ok(Err(message)) => {
-            let _ = handle.join();
-            Err(message)
-        }
-        Err(_) => {
-            stop.store(true, Ordering::Relaxed);
-            let _ = handle.join();
-            Err("timed out while connecting to signaling server".to_string())
-        }
-    }
-}
-
-#[cfg(feature = "webrtc")]
-fn drain_outbound_sdp(
-    client: &mut SignalingClient,
-    identity: &LocalIdentity,
-    outbound_sdp: &mut tokio::sync::mpsc::UnboundedReceiver<SdpSignal>,
-    session_id: Option<&str>,
-    target_public_key_hex: Option<&str>,
-) -> Result<(), String> {
-    loop {
-        match outbound_sdp.try_recv() {
-            Ok(signal) => {
-                let session_id =
-                    session_id.ok_or_else(|| "no active signaling session".to_string())?;
-                let target_public_key_hex = target_public_key_hex
-                    .ok_or_else(|| "no signaling target public key".to_string())?;
-                let kind = if signal.is_offer { "offer" } else { "answer" };
-                // T3: sign the SDP with our identity key so the peer can detect a
-                // server tampering with / substituting it (design §7).
-                let payload_hex = linkhub_core::seal_sdp(identity, session_id, kind, &signal.sdp)
-                    .map_err(|err| format!("failed to sign WebRTC {kind}: {err}"))?;
-                client
-                    .send_signaling(target_public_key_hex, session_id, kind, &payload_hex)
-                    .map_err(|err| format!("failed to relay WebRTC {kind}: {err}"))?;
-            }
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return Ok(()),
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return Ok(()),
-        }
-    }
-}
-
-#[cfg(feature = "webrtc")]
-fn accept_signaling_delivery(
-    role: &WebRtcSignalingRole,
-    delivery: &linkhub_core::SignalingDelivery,
-    active_session_id: &mut Option<String>,
-    target_public_key_hex: &mut Option<String>,
-) -> bool {
-    if let Some(session_id) = active_session_id.as_deref() {
-        if delivery.session_id != session_id {
-            return false;
-        }
-    }
-
-    match role {
-        WebRtcSignalingRole::Initiator {
-            peer_public_key_hex,
-            ..
-        } => delivery.kind == "answer" && delivery.from_public_key_hex == *peer_public_key_hex,
-        WebRtcSignalingRole::Responder { trust_store } => {
-            if delivery.kind != "offer" {
-                return false;
-            }
-
-            let Some(trusted) = trust_store.trusted_device(&delivery.from_device_id) else {
-                return false;
-            };
-            if trusted.identity().public_key() != delivery.from_public_key_hex {
-                return false;
-            }
-
-            if active_session_id.is_none() {
-                *active_session_id = Some(delivery.session_id.clone());
-                *target_public_key_hex = Some(delivery.from_public_key_hex.clone());
-            }
-
-            true
-        }
-    }
-}
-
-#[cfg(feature = "webrtc")]
-fn delivery_to_sdp_signal(delivery: &linkhub_core::SignalingDelivery) -> Result<SdpSignal, String> {
-    // T3: verify the SDP was signed by the peer identity key we already vetted in
-    // `accept_signaling_delivery` (initiator: the target peer; responder: a
-    // trusted device), bound to this session and role. Rejects a server that
-    // tampered with or substituted the SDP (design §7).
-    let sdp = linkhub_core::open_sdp(
-        &delivery.from_public_key_hex,
-        &delivery.session_id,
-        &delivery.kind,
-        &delivery.payload_hex,
-    )
-    .map_err(|err| format!("rejected unsigned/tampered WebRTC {}: {err}", delivery.kind))?;
-
-    Ok(SdpSignal {
-        is_offer: delivery.kind == "offer",
-        sdp,
-    })
-}
-
-#[cfg(feature = "webrtc")]
-fn finish_webrtc_establishment(
-    established: std::io::Result<linkhub_core::net::webrtc_transport::DataChannelDuplex>,
-    bridge_result: Result<(), String>,
-) -> Result<linkhub_core::net::webrtc_transport::DataChannelDuplex, String> {
-    match (established, bridge_result) {
-        (Ok(duplex), Ok(())) => Ok(duplex),
-        (Err(err), Ok(())) => Err(format!("failed to establish WebRTC DataChannel: {err}")),
-        (_, Err(err)) => Err(err),
-    }
-}
-
-#[cfg(feature = "webrtc")]
-fn new_webrtc_runtime() -> Result<tokio::runtime::Runtime, String> {
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
-        .map_err(|err| format!("failed to start WebRTC runtime: {err}"))
-}
-
-#[cfg(feature = "webrtc")]
-fn is_poll_timeout(err: &std::io::Error) -> bool {
-    matches!(
-        err.kind(),
-        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-    )
-}
-
-#[cfg(feature = "webrtc")]
-fn new_webrtc_session_id(device_id: &str) -> String {
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    format!("webrtc-{}-{millis}", sanitize_cli_token(device_id))
+    println!("WebRTC file received into {receive_dir}");
+    Ok(())
 }
 
 #[cfg(feature = "webrtc")]
@@ -1582,23 +1278,6 @@ fn lookup_peer_identity(
         .trusted_device(peer_device_id)
         .map(|trusted| trusted.identity().clone())
         .ok_or_else(|| format!("peer device not found in trust store: {peer_device_id}"))
-}
-
-#[cfg(feature = "webrtc")]
-fn dh_key_from_identity(identity: &DeviceIdentity) -> Result<[u8; 32], String> {
-    let dh_bytes = linkhub_core::decode_hex(identity.dh_public_key())
-        .map_err(|err| format!("invalid peer dh key: {err}"))?;
-    dh_bytes
-        .try_into()
-        .map_err(|bytes: Vec<u8>| format!("peer dh key must be 32 bytes, got {}", bytes.len()))
-}
-
-#[cfg(feature = "webrtc")]
-fn sanitize_cli_token(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
-        .collect()
 }
 
 fn render_status_text(identity: &LocalIdentity, trust_store: &TrustStore) -> String {

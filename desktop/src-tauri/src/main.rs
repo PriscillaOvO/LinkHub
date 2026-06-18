@@ -2,8 +2,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use linkhub_core::{
-    DiscoveryEndpoint, LocalIdentity, MdnsAdvertisement, MdnsRegistration, MdnsRuntime,
-    PairingInvitation, PairingSession, TrustStore,
+    plan_connection, ConnectionPath, DiscoveryEndpoint, LocalIdentity, MdnsAdvertisement,
+    MdnsRegistration, MdnsRuntime, PairingInvitation, PairingSession, PeerReachability, TrustStore,
 };
 use qrcode::render::svg;
 use qrcode::QrCode;
@@ -154,20 +154,20 @@ fn append_history(history_path: &str, entry: HistoryEntry) -> Result<(), String>
     let path = resolved_history_path(history_path);
     let mut history = TransmissionHistory { entries: vec![] };
     if std::path::Path::new(path).exists() {
-        let raw = std::fs::read_to_string(path).map_err(|e| format!("{e}"))?;
+        let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         history = serde_json::from_str(&raw).unwrap_or(TransmissionHistory { entries: vec![] });
     }
     history.entries.push(entry);
     if let Some(parent) = std::path::Path::new(path).parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{e}"))?;
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
     }
     std::fs::write(
         path,
-        serde_json::to_string_pretty(&history).map_err(|e| format!("{e}"))?,
+        serde_json::to_string_pretty(&history).map_err(|e| e.to_string())?,
     )
-    .map_err(|e| format!("{e}"))?;
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -289,7 +289,7 @@ fn pairing_generate_qr(identity_path: String, ttl_seconds: u64) -> Result<QrPayl
 fn pairing_inspect(identity_path: String, payload: String) -> Result<PeerInfo, String> {
     let identity = load_identity(&identity_path)?;
     let invitation =
-        PairingInvitation::from_payload(&payload, SystemTime::now()).map_err(|e| format!("{e}"))?;
+        PairingInvitation::from_payload(&payload, SystemTime::now()).map_err(|e| e.to_string())?;
     let session = PairingSession::new(identity.identity().clone(), invitation);
     Ok(PeerInfo {
         device_name: session.peer_identity().device_name().to_string(),
@@ -308,7 +308,7 @@ fn pairing_confirm(
 ) -> Result<TrustedPeer, String> {
     let identity = load_identity(&identity_path)?;
     let invitation =
-        PairingInvitation::from_payload(&payload, SystemTime::now()).map_err(|e| format!("{e}"))?;
+        PairingInvitation::from_payload(&payload, SystemTime::now()).map_err(|e| e.to_string())?;
     let session = PairingSession::new(identity.identity().clone(), invitation);
     let trusted = session
         .confirm(&confirmation_code, SystemTime::now(), SystemTime::now())
@@ -468,12 +468,12 @@ async fn send_encrypted_text(
     text: String,
 ) -> Result<SendResult, String> {
     let identity = load_identity(&identity_path)?;
-    let store = TrustStore::load_from_path(&trust_store_path).map_err(|e| format!("{e}"))?;
+    let store = TrustStore::load_from_path(&trust_store_path).map_err(|e| e.to_string())?;
     let peer = store
         .trusted_device(&peer_device_id)
         .ok_or_else(|| format!("peer device '{peer_device_id}' not in trust store"))?;
     let dh_hex = peer.identity().dh_public_key();
-    let dh_bytes = linkhub_core::decode_hex(dh_hex).map_err(|e| format!("{e}"))?;
+    let dh_bytes = linkhub_core::decode_hex(dh_hex).map_err(|e| e.to_string())?;
     let dh_bytes: [u8; 32] = dh_bytes
         .try_into()
         .map_err(|_| "dh key must be 32 bytes".to_string())?;
@@ -523,12 +523,12 @@ async fn send_encrypted_file(
     file_path: String,
 ) -> Result<SendResult, String> {
     let identity = load_identity(&identity_path)?;
-    let store = TrustStore::load_from_path(&trust_store_path).map_err(|e| format!("{e}"))?;
+    let store = TrustStore::load_from_path(&trust_store_path).map_err(|e| e.to_string())?;
     let peer = store
         .trusted_device(&peer_device_id)
         .ok_or_else(|| format!("peer device '{peer_device_id}' not in trust store"))?;
     let dh_hex = peer.identity().dh_public_key();
-    let dh_bytes = linkhub_core::decode_hex(dh_hex).map_err(|e| format!("{e}"))?;
+    let dh_bytes = linkhub_core::decode_hex(dh_hex).map_err(|e| e.to_string())?;
     let dh_bytes: [u8; 32] = dh_bytes
         .try_into()
         .map_err(|_| "dh key must be 32 bytes".to_string())?;
@@ -574,6 +574,228 @@ async fn send_encrypted_file(
     })
 }
 
+// ── Cross-network (WebRTC) commands ────────────────────────────────
+
+#[derive(Clone, Serialize)]
+struct TransportPath {
+    /// Stable machine id: "lan" | "webrtc" | "relay".
+    kind: String,
+    /// Human label for the UI (中文).
+    label: String,
+    /// Optional detail (e.g. the LAN address).
+    detail: String,
+}
+
+/// Ordered transport plan for a peer (LAN 直连 → WebRTC 打洞 → 中继), driven by
+/// core's `plan_connection`/`ConnectionPath`. The UI shows this so the user knows
+/// which path a transfer will take. Pure — no network, no `webrtc` feature.
+#[tauri::command]
+fn connection_plan(
+    lan_addr: Option<String>,
+    signaling_available: bool,
+    relay_available: bool,
+) -> Vec<TransportPath> {
+    let reachability = PeerReachability {
+        lan_addr: lan_addr.filter(|addr| !addr.trim().is_empty()),
+        signaling_available,
+        relay_available,
+    };
+    plan_connection(&reachability)
+        .paths
+        .iter()
+        .map(|path| match path {
+            ConnectionPath::LanTcp { addr } => TransportPath {
+                kind: "lan".into(),
+                label: "局域网直连".into(),
+                detail: addr.clone(),
+            },
+            ConnectionPath::WebRtc => TransportPath {
+                kind: "webrtc".into(),
+                label: "打洞直连 (WebRTC)".into(),
+                detail: String::new(),
+            },
+            ConnectionPath::CloudRelay => TransportPath {
+                kind: "relay".into(),
+                label: "中继转发 (TURN)".into(),
+                detail: String::new(),
+            },
+        })
+        .collect()
+}
+
+#[cfg(feature = "webrtc")]
+fn build_ice_config(
+    ice_urls: Vec<String>,
+    turn_username: Option<String>,
+    turn_credential: Option<String>,
+    relay_only: bool,
+) -> linkhub_core::net::webrtc_transport::IceConfig {
+    use linkhub_core::net::webrtc_transport::{IceConfig, IceServer};
+    let username = turn_username.unwrap_or_default();
+    let credential = turn_credential.unwrap_or_default();
+    let servers = ice_urls
+        .into_iter()
+        .filter(|url| !url.trim().is_empty())
+        .map(|url| {
+            if url.starts_with("turn:") || url.starts_with("turns:") {
+                IceServer::turn(url, username.clone(), credential.clone())
+            } else {
+                IceServer::stun(url)
+            }
+        })
+        .collect();
+    IceConfig {
+        servers,
+        force_relay: relay_only,
+    }
+}
+
+#[cfg(not(feature = "webrtc"))]
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn webrtc_send_file(
+    _signaling_url: String,
+    _identity_path: String,
+    _peer_device_id: String,
+    _trust_store_path: String,
+    _history_path: String,
+    _file_path: String,
+    _ice_urls: Vec<String>,
+    _turn_username: Option<String>,
+    _turn_credential: Option<String>,
+    _relay_only: bool,
+) -> Result<SendResult, String> {
+    Err("此构建未启用跨网络 (WebRTC) 功能，请用 `--features webrtc` 重新构建".into())
+}
+
+#[cfg(feature = "webrtc")]
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn webrtc_send_file(
+    signaling_url: String,
+    identity_path: String,
+    peer_device_id: String,
+    trust_store_path: String,
+    history_path: String,
+    file_path: String,
+    ice_urls: Vec<String>,
+    turn_username: Option<String>,
+    turn_credential: Option<String>,
+    relay_only: bool,
+) -> Result<SendResult, String> {
+    let identity = load_identity(&identity_path)?;
+    let store = TrustStore::load_from_path(&trust_store_path).map_err(|e| e.to_string())?;
+    let peer = store
+        .trusted_device(&peer_device_id)
+        .ok_or_else(|| format!("peer device '{peer_device_id}' not in trust store"))?;
+    let peer_identity = peer.identity().clone();
+    let peer_name = peer.device_name().to_string();
+    let ice = build_ice_config(ice_urls, turn_username, turn_credential, relay_only);
+    let fname = std::path::Path::new(&file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&file_path)
+        .to_string();
+
+    // The transfer is blocking (runs its own tokio runtime + signaling thread);
+    // keep it off the async/UI thread.
+    let send = tauri::async_runtime::spawn_blocking(move || {
+        linkhub_core::net::webrtc_session::send_file_over_webrtc(
+            &signaling_url,
+            &identity,
+            &peer_identity,
+            ice,
+            &file_path,
+        )
+    })
+    .await
+    .map_err(|e| format!("webrtc send task failed: {e}"))?;
+
+    if let Err(err) = send {
+        let detail = format!("failed: {err}");
+        append_send_history(
+            &history_path,
+            &peer_device_id,
+            &peer_name,
+            "file-webrtc",
+            fname,
+            &detail,
+        );
+        return Err(format!("跨网络发送失败: {err}"));
+    }
+
+    append_send_history(
+        &history_path,
+        &peer_device_id,
+        &peer_name,
+        "file-webrtc",
+        fname,
+        "success",
+    );
+    Ok(SendResult {
+        success: true,
+        message_id: String::new(),
+        detail: "文件已通过跨网络 (WebRTC) 发送并确认".to_string(),
+    })
+}
+
+#[cfg(not(feature = "webrtc"))]
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn webrtc_receive_file(
+    _signaling_url: String,
+    _identity_path: String,
+    _trust_store_path: String,
+    _receive_dir: String,
+    _ice_urls: Vec<String>,
+    _turn_username: Option<String>,
+    _turn_credential: Option<String>,
+    _relay_only: bool,
+) -> Result<SendResult, String> {
+    Err("此构建未启用跨网络 (WebRTC) 功能，请用 `--features webrtc` 重新构建".into())
+}
+
+#[cfg(feature = "webrtc")]
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn webrtc_receive_file(
+    signaling_url: String,
+    identity_path: String,
+    trust_store_path: String,
+    receive_dir: String,
+    ice_urls: Vec<String>,
+    turn_username: Option<String>,
+    turn_credential: Option<String>,
+    relay_only: bool,
+) -> Result<SendResult, String> {
+    let identity = load_identity(&identity_path)?;
+    let trust_store = std::sync::Arc::new(
+        TrustStore::load_from_path(&trust_store_path)
+            .map_err(|e| format!("failed to load trust store: {e}"))?,
+    );
+    let ice = build_ice_config(ice_urls, turn_username, turn_credential, relay_only);
+
+    let received = tauri::async_runtime::spawn_blocking(move || {
+        linkhub_core::net::webrtc_session::receive_file_over_webrtc(
+            &signaling_url,
+            identity,
+            trust_store,
+            &receive_dir,
+            ice,
+            None,
+        )
+    })
+    .await
+    .map_err(|e| format!("webrtc receive task failed: {e}"))?;
+
+    received.map_err(|err| format!("跨网络接收失败: {err}"))?;
+    Ok(SendResult {
+        success: true,
+        message_id: String::new(),
+        detail: "已通过跨网络 (WebRTC) 接收文件".to_string(),
+    })
+}
+
 // ── History commands ───────────────────────────────────────────────
 
 #[tauri::command]
@@ -582,15 +804,15 @@ fn get_history(history_path: String) -> Result<TransmissionHistory, String> {
     if !std::path::Path::new(path).exists() {
         return Ok(TransmissionHistory { entries: vec![] });
     }
-    let raw = std::fs::read_to_string(path).map_err(|e| format!("{e}"))?;
-    serde_json::from_str(&raw).map_err(|e| format!("{e}"))
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    serde_json::from_str(&raw).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn clear_history(history_path: String) -> Result<(), String> {
     let path = resolved_history_path(&history_path);
     if std::path::Path::new(path).exists() {
-        std::fs::write(path, "{\"entries\":[]}").map_err(|e| format!("{e}"))?;
+        std::fs::write(path, "{\"entries\":[]}").map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -826,7 +1048,7 @@ fn main() {
                         ..
                     } = event
                     {
-                        focus_main_window(&tray.app_handle());
+                        focus_main_window(tray.app_handle());
                     }
                 })
                 .build(app)?;
@@ -845,6 +1067,9 @@ fn main() {
             choose_folder_path,
             send_encrypted_text,
             send_encrypted_file,
+            connection_plan,
+            webrtc_send_file,
+            webrtc_receive_file,
             get_history,
             clear_history,
             start_listener,
@@ -867,6 +1092,7 @@ mod tests {
     use super::*;
     use std::env;
     use std::fs;
+    use std::time::Instant;
 
     fn temp_dir() -> std::path::PathBuf {
         let dir = env::temp_dir().join(format!(
@@ -1031,6 +1257,27 @@ mod tests {
         assert_eq!(history.entries.len(), 1);
         assert_eq!(history.entries[0].status, "failed: connection refused");
         fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn smoke_connection_plan_orders_lan_webrtc_relay() {
+        let plan = connection_plan(Some("192.168.1.9:8787".into()), true, true);
+        let kinds: Vec<String> = plan.iter().map(|p| p.kind.clone()).collect();
+        assert_eq!(kinds, vec!["lan", "webrtc", "relay"]);
+        assert_eq!(plan[0].detail, "192.168.1.9:8787");
+        assert!(plan.iter().all(|p| !p.label.is_empty()));
+    }
+
+    #[test]
+    fn smoke_connection_plan_skips_unavailable_paths() {
+        // No LAN address, no relay: only the WebRTC hole-punch path remains.
+        let plan = connection_plan(None, true, false);
+        let kinds: Vec<String> = plan.iter().map(|p| p.kind.clone()).collect();
+        assert_eq!(kinds, vec!["webrtc"]);
+
+        // Blank LAN address is treated as absent.
+        let plan_blank = connection_plan(Some("   ".into()), false, false);
+        assert!(plan_blank.is_empty());
     }
 
     #[test]
