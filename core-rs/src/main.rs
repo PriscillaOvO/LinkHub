@@ -12,7 +12,8 @@ use linkhub_core::{
     run_connector_with_receive_dir, run_file_control_sender, run_file_sender,
     run_listener_with_receive_dir, run_text_sender, DeviceAgent, DeviceIdentity, DeviceNode,
     DiscoveryEndpoint, HeartbeatUpdate, LocalDevice, LocalIdentity, MdnsAdvertisement, MdnsRuntime,
-    PairingInvitation, PairingSession, TransportKind, TrustStore, TrustedDevice,
+    PairingInvitation, PairingSession, SignalingClient, SignalingEvent, TransportKind, TrustStore,
+    TrustedDevice,
 };
 
 fn main() -> ExitCode {
@@ -133,6 +134,19 @@ fn run() -> Result<(), String> {
         "status-html" => {
             let (identity_path, trust_store_path, output_path) = parse_status_html_args(&args)?;
             run_status_html(&identity_path, &trust_store_path, &output_path)
+        }
+        "signal-listen" => {
+            let (ws_url, identity_path) = parse_signal_listen_args(&args)?;
+            let identity = load_local_identity_arg(&identity_path)
+                .map_err(|err| format!("failed to load identity {identity_path}: {err}"))?;
+            run_signal_listen(&ws_url, identity)
+        }
+        "signal-relay" => {
+            let (ws_url, identity_path, to_public_key_hex, kind, payload_hex) =
+                parse_signal_relay_args(&args)?;
+            let identity = load_local_identity_arg(&identity_path)
+                .map_err(|err| format!("failed to load identity {identity_path}: {err}"))?;
+            run_signal_relay(&ws_url, identity, &to_public_key_hex, &kind, &payload_hex)
         }
         "identity" => run_identity_command(&args),
         _ => Err(usage()),
@@ -439,6 +453,10 @@ fn usage() -> String {
         &command_usage("scan-trusted-mdns <local_name> <trust_store_path> [seconds]"),
         &command_usage("status <identity_path> <trust_store_path>"),
         &command_usage("status-html <identity_path> <trust_store_path> <output_html_path>"),
+        &command_usage("signal-listen <ws_url> <identity_path>"),
+        &command_usage(
+            "signal-relay <ws_url> <identity_path> <to_public_key_hex> <kind> <payload_hex>",
+        ),
     ]
     .join("\n")
 }
@@ -849,6 +867,98 @@ fn run_status_html(
         )
     })?;
     println!("status_page={}", output_path.display());
+    Ok(())
+}
+
+fn parse_signal_listen_args(args: &[String]) -> Result<(String, String), String> {
+    if args.len() != 2 {
+        return Err(format!(
+            "usage: {}",
+            command_usage("signal-listen <ws_url> <identity_path>")
+        ));
+    }
+
+    Ok((args[0].clone(), args[1].clone()))
+}
+
+fn parse_signal_relay_args(
+    args: &[String],
+) -> Result<(String, String, String, String, String), String> {
+    if args.len() != 5 {
+        return Err(format!(
+            "usage: {}",
+            command_usage(
+                "signal-relay <ws_url> <identity_path> <to_public_key_hex> <kind> <payload_hex>"
+            )
+        ));
+    }
+
+    Ok((
+        args[0].clone(),
+        args[1].clone(),
+        args[2].clone(),
+        args[3].clone(),
+        args[4].clone(),
+    ))
+}
+
+fn run_signal_listen(ws_url: &str, identity: LocalIdentity) -> Result<(), String> {
+    let mut client = SignalingClient::connect(ws_url, &identity)
+        .map_err(|err| format!("failed to connect to signaling server {ws_url}: {err}"))?;
+
+    println!(
+        "Signaling: present as device_id={} public_key={}",
+        client.device_id(),
+        client.public_key_hex()
+    );
+    println!("Waiting for signaling deliveries (Ctrl-C to stop)...");
+
+    loop {
+        match client.recv() {
+            Ok(SignalingEvent::Delivery(delivery)) => {
+                println!(
+                    "Signaling delivery from device_id={} public_key={} session={} kind={} payload_hex={}",
+                    delivery.from_device_id,
+                    delivery.from_public_key_hex,
+                    delivery.session_id,
+                    delivery.kind,
+                    delivery.payload_hex
+                );
+            }
+            Ok(SignalingEvent::ServerError(reason)) => {
+                println!("Signaling server error: {reason}");
+            }
+            Err(err) => {
+                return Err(format!("signaling connection ended: {err}"));
+            }
+        }
+    }
+}
+
+fn run_signal_relay(
+    ws_url: &str,
+    identity: LocalIdentity,
+    to_public_key_hex: &str,
+    kind: &str,
+    payload_hex: &str,
+) -> Result<(), String> {
+    let mut client = SignalingClient::connect(ws_url, &identity)
+        .map_err(|err| format!("failed to connect to signaling server {ws_url}: {err}"))?;
+
+    let session_id = format!(
+        "{}-{}",
+        identity.device_id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+
+    client
+        .send_signaling(to_public_key_hex, &session_id, kind, payload_hex)
+        .map_err(|err| format!("failed to relay signaling: {err}"))?;
+
+    println!("Signaling relayed to {to_public_key_hex} (session {session_id}, kind {kind})");
     Ok(())
 }
 

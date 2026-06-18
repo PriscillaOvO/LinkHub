@@ -144,17 +144,12 @@ pub fn route_from_reachability(
 
 // ── Relay policy ───────────────────────────────────────────────────
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub enum RelayPolicy {
     Deny,
+    #[default]
     AllowKnownOnly,
     AllowAll,
-}
-
-impl Default for RelayPolicy {
-    fn default() -> Self {
-        Self::AllowKnownOnly
-    }
 }
 
 #[cfg(test)]

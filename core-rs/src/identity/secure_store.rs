@@ -87,7 +87,7 @@ pub(super) fn protect_local_identity_bytes(plaintext: &[u8]) -> io::Result<Vec<u
         CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
 
-    let mut input = CRYPT_INTEGER_BLOB {
+    let input = CRYPT_INTEGER_BLOB {
         cbData: plaintext.len().try_into().map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "local identity is too large")
         })?,
@@ -96,7 +96,7 @@ pub(super) fn protect_local_identity_bytes(plaintext: &[u8]) -> io::Result<Vec<u
     let mut output = CRYPT_INTEGER_BLOB::default();
     let result = unsafe {
         CryptProtectData(
-            &mut input,
+            &input,
             ptr::null(),
             ptr::null(),
             ptr::null_mut(),
@@ -230,7 +230,7 @@ pub(super) fn unprotect_local_identity_bytes(encrypted: &[u8]) -> io::Result<Vec
         CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
 
-    let mut input = CRYPT_INTEGER_BLOB {
+    let input = CRYPT_INTEGER_BLOB {
         cbData: encrypted.len().try_into().map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -242,7 +242,7 @@ pub(super) fn unprotect_local_identity_bytes(encrypted: &[u8]) -> io::Result<Vec
     let mut output = CRYPT_INTEGER_BLOB::default();
     let result = unsafe {
         CryptUnprotectData(
-            &mut input,
+            &input,
             ptr::null_mut(),
             ptr::null(),
             ptr::null_mut(),

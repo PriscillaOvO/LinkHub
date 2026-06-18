@@ -219,18 +219,13 @@ pub struct MultiPathSession {
     pub preferred_transport: PreferredTransport,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub enum PreferredTransport {
+    #[default]
     Auto,
     LanTcp,
     WebRtc,
     AnyAvailable,
-}
-
-impl Default for PreferredTransport {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl MultiPathSession {
@@ -335,16 +330,20 @@ mod tests {
 
     #[test]
     fn quality_stats_loss_ratio_correct() {
-        let mut stats = TransportQualityStats::default();
-        stats.packets_sent = 100;
-        stats.packets_lost = 5;
+        let stats = TransportQualityStats {
+            packets_sent: 100,
+            packets_lost: 5,
+            ..Default::default()
+        };
         assert!((stats.loss_ratio() - 0.05).abs() < 0.001);
     }
 
     #[test]
     fn quality_level_degradation() {
-        let mut stats = TransportQualityStats::default();
-        stats.bandwidth_estimate_kbps = 2000;
+        let mut stats = TransportQualityStats {
+            bandwidth_estimate_kbps: 2000,
+            ..Default::default()
+        };
         assert_eq!(QualityLevel::from_stats(&stats), QualityLevel::High);
 
         stats.bandwidth_estimate_kbps = 300;

@@ -99,7 +99,7 @@ impl GossipState {
 
     /// Check if we've already seen this gossip message.
     pub fn is_duplicate(&self, origin: &str, sequence: u64) -> bool {
-        self.seen.get(origin).map_or(false, |&s| s >= sequence)
+        self.seen.get(origin).is_some_and(|&s| s >= sequence)
     }
 
     /// Mark a gossip message as seen.
@@ -110,7 +110,7 @@ impl GossipState {
     /// Check if it's time to broadcast.
     pub fn should_broadcast(&self, now: Instant) -> bool {
         self.last_broadcast
-            .map_or(true, |t| now.duration_since(t) >= GOSSIP_INTERVAL)
+            .is_none_or(|t| now.duration_since(t) >= GOSSIP_INTERVAL)
     }
 
     /// Get the next sequence number.

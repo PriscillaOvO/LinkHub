@@ -1,27 +1,31 @@
 use std::fs::{self, File};
-use std::io::{self, BufReader, Read};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{DeviceAgent, LocalIdentity};
+use crate::{DeviceAgent, LocalIdentity, TrustStore};
 
 mod ack;
 mod auth_listener;
 mod auth_session;
+mod connection_plan;
 mod file_transfer;
 mod protocol;
 mod session;
+mod signaling_client;
+#[cfg(feature = "webrtc")]
+pub mod webrtc_transport;
 
 use ack::{
     send_file_start_with_retries, send_text_with_retries, send_with_ack_retries, write_message,
     ACK_TIMEOUT,
 };
 use auth_session::{
-    open_authenticated_stream, send_encrypted_file_start_with_retries,
-    send_encrypted_with_ack_retries,
+    open_authenticated_stream, perform_initiator_handshake, run_authenticated_session_over,
+    send_encrypted_file_start_with_retries, send_encrypted_with_ack_retries,
 };
 use file_transfer::{file_chunk_ack_id, file_sha256_hex, file_transfer_id, FILE_CHUNK_SIZE};
 use protocol::{encode_hex, sanitize_field, WireMessage};
@@ -32,6 +36,11 @@ pub use auth_listener::{
     run_authenticated_listener_until, run_authenticated_listener_with_receive_dir,
     run_authenticated_text_listener, FileReceivedCallback, ReceivedFileEvent,
 };
+pub use connection_plan::{
+    attempt_with_fallback, plan_connection, preferred_established_route, ConnectionPath,
+    ConnectionPlan, PeerReachability,
+};
+pub use signaling_client::{SignalingClient, SignalingDelivery, SignalingEvent};
 
 const RECEIVED_DIR: &str = "received";
 
@@ -143,13 +152,10 @@ pub fn run_authenticated_text_sender(
     peer_dh_public_key: &[u8; 32],
     text: &str,
 ) -> io::Result<()> {
-    let message_id = new_message_id(local_identity.device_id());
-
     println!(
-        "LinkHub authenticated agent '{}' ({}) sending text {} to {}",
+        "LinkHub authenticated agent '{}' ({}) sending text to {}",
         local_identity.device_name(),
         local_identity.device_id(),
-        message_id,
         peer_addr
     );
 
@@ -159,6 +165,7 @@ pub fn run_authenticated_text_sender(
         peer_device_id,
         peer_dh_public_key,
     )?;
+    let message_id = new_message_id(local_identity.device_id());
     send_encrypted_with_ack_retries(
         &mut transport,
         &mut stream,
@@ -173,9 +180,99 @@ pub fn run_authenticated_text_sender(
     Ok(())
 }
 
+/// Transport-agnostic authenticated TEXT send (Stage 5): runs the initiator
+/// handshake + Noise KK + one encrypted TEXT over any duplex byte stream
+/// (`writer`/`reader` are independent handles to the same connection). LAN uses
+/// [`run_authenticated_text_sender`] over TCP; the WebRTC path drives this over a
+/// [`crate::net::webrtc_transport::DataChannelDuplex`].
+pub fn run_authenticated_text_sender_over<W: Write, R: BufRead>(
+    mut writer: W,
+    mut reader: R,
+    local_identity: &LocalIdentity,
+    peer_device_id: &str,
+    peer_dh_public_key: &[u8; 32],
+    text: &str,
+) -> io::Result<()> {
+    let mut transport = perform_initiator_handshake(
+        &mut writer,
+        &mut reader,
+        local_identity,
+        peer_device_id,
+        peer_dh_public_key,
+    )?;
+    let message_id = new_message_id(local_identity.device_id());
+    send_encrypted_with_ack_retries(
+        &mut transport,
+        &mut writer,
+        &mut reader,
+        &message_id,
+        "TEXT_RECEIVED",
+        || WireMessage::text(&message_id, text),
+        "TEXT",
+    )
+}
+
+/// Transport-agnostic responder side: trust-store-authenticated Noise KK receive
+/// loop over any duplex stream. Thin public wrapper over the internal
+/// session runner so non-TCP transports (WebRTC) can reuse it.
+pub fn run_authenticated_responder_over<W: Write, R: BufRead>(
+    writer: W,
+    reader: R,
+    local_identity: LocalIdentity,
+    trust_store: Arc<TrustStore>,
+    receive_dir: impl AsRef<Path>,
+    on_file_received: Option<FileReceivedCallback>,
+) -> io::Result<()> {
+    run_authenticated_session_over(
+        writer,
+        reader,
+        local_identity,
+        trust_store,
+        receive_dir.as_ref().to_path_buf(),
+        on_file_received,
+    )
+}
+
 pub fn run_authenticated_file_sender(
     peer_addr: &str,
     local_identity: LocalIdentity,
+    peer_device_id: &str,
+    peer_dh_public_key: &[u8; 32],
+    path: impl AsRef<Path>,
+) -> io::Result<()> {
+    println!(
+        "LinkHub authenticated agent '{}' ({}) sending file to {}",
+        local_identity.device_name(),
+        local_identity.device_id(),
+        peer_addr
+    );
+
+    let stream = TcpStream::connect(peer_addr)?;
+    stream.set_read_timeout(Some(ACK_TIMEOUT))?;
+    let reader = BufReader::new(stream.try_clone()?);
+
+    run_authenticated_file_sender_over(
+        &stream,
+        reader,
+        &local_identity,
+        peer_device_id,
+        peer_dh_public_key,
+        path,
+    )?;
+    let _ = stream.shutdown(Shutdown::Write);
+
+    Ok(())
+}
+
+/// Transport-agnostic authenticated FILE send (Stage 5): initiator handshake +
+/// Noise KK + chunked FILE_START/FILE_CHUNK/FILE_END with per-chunk ACKs and
+/// resume, over any duplex byte stream. LAN uses [`run_authenticated_file_sender`]
+/// over TCP; the WebRTC path drives this over a
+/// [`crate::net::webrtc_transport::DataChannelDuplex`].
+pub fn run_authenticated_file_sender_over<W: Write, R: BufRead>(
+    mut writer: W,
+    mut reader: R,
+    local_identity: &LocalIdentity,
     peer_device_id: &str,
     peer_dh_public_key: &[u8; 32],
     path: impl AsRef<Path>,
@@ -207,24 +304,17 @@ pub fn run_authenticated_file_sender(
         &sha256_hex,
     );
 
-    println!(
-        "LinkHub authenticated agent '{}' ({}) sending file {} to {}",
-        local_identity.device_name(),
-        local_identity.device_id(),
-        transfer_id,
-        peer_addr
-    );
-
-    let (mut stream, mut reader, mut transport) = open_authenticated_stream(
-        peer_addr,
-        &local_identity,
+    let mut transport = perform_initiator_handshake(
+        &mut writer,
+        &mut reader,
+        local_identity,
         peer_device_id,
         peer_dh_public_key,
     )?;
 
     let resume_from_chunk = send_encrypted_file_start_with_retries(
         &mut transport,
-        &mut stream,
+        &mut writer,
         &mut reader,
         &transfer_id,
         || WireMessage::file_start_with_hash(&transfer_id, filename, metadata.len(), &sha256_hex),
@@ -251,7 +341,7 @@ pub fn run_authenticated_file_sender(
         let chunk_ack_id = file_chunk_ack_id(&transfer_id, chunk_index);
         send_encrypted_with_ack_retries(
             &mut transport,
-            &mut stream,
+            &mut writer,
             &mut reader,
             &chunk_ack_id,
             "FILE_CHUNK_RECEIVED",
@@ -264,16 +354,13 @@ pub fn run_authenticated_file_sender(
 
     send_encrypted_with_ack_retries(
         &mut transport,
-        &mut stream,
+        &mut writer,
         &mut reader,
         &transfer_id,
         "FILE_END_RECEIVED",
         || WireMessage::file_end(&transfer_id),
         "FILE_END",
-    )?;
-    let _ = stream.shutdown(Shutdown::Write);
-
-    Ok(())
+    )
 }
 
 pub fn run_file_control_sender(

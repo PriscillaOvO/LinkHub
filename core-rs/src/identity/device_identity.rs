@@ -95,7 +95,7 @@ pub struct LocalIdentity {
 impl LocalIdentity {
     pub fn generate(device_name: impl Into<String>, created_at: SystemTime) -> Self {
         let signing_key = SigningKey::generate(&mut OsRng);
-        let dh_static = DhStaticSecret::random_from_rng(&mut OsRng);
+        let dh_static = DhStaticSecret::random_from_rng(OsRng);
 
         Self::from_keys(
             device_name,
@@ -258,6 +258,21 @@ impl LocalIdentity {
         let signing_key_bytes = hex_array::<32>(&self.signing_key_hex)?;
         let signing_key = SigningKey::from_bytes(&signing_key_bytes);
         let challenge = handshake_challenge(self.device_id(), peer_device_id, nonce);
+        let signature = signing_key.sign(challenge.as_bytes());
+
+        Ok(encode_hex(&signature.to_bytes()))
+    }
+
+    /// Sign a signaling-server login challenge with this device's Ed25519
+    /// identity key. Domain-separated from [`Self::sign_handshake_challenge`]
+    /// (which binds two device ids for p2p) so a signature gathered for server
+    /// login can never be replayed as a peer handshake, and vice versa. Must
+    /// stay byte-for-byte in sync with the server's `auth::challenge_string`
+    /// (`signaling-server/src/auth.rs`).
+    pub fn sign_signaling_login(&self, nonce: &str) -> Result<String, String> {
+        let signing_key_bytes = hex_array::<32>(&self.signing_key_hex)?;
+        let signing_key = SigningKey::from_bytes(&signing_key_bytes);
+        let challenge = format!("linkhub-signaling-auth-v1\0{}", nonce.trim());
         let signature = signing_key.sign(challenge.as_bytes());
 
         Ok(encode_hex(&signature.to_bytes()))
