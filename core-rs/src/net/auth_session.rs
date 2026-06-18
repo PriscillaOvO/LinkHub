@@ -9,7 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -33,8 +33,33 @@ pub(super) fn run_authenticated_session(
     receive_dir: PathBuf,
     on_file_received: Option<FileReceivedCallback>,
 ) -> io::Result<()> {
-    let mut writer = stream.try_clone()?;
-    let mut reader = BufReader::new(stream);
+    let writer = stream.try_clone()?;
+    let reader = BufReader::new(stream);
+    run_authenticated_session_over(
+        writer,
+        reader,
+        local_identity,
+        trust_store,
+        receive_dir,
+        on_file_received,
+    )
+}
+
+/// Transport-agnostic responder side of the authenticated session.
+///
+/// Runs over any duplex byte stream — LAN `TcpStream` today; WebRTC DataChannel
+/// or relay tunnel in stage 5 (see `docs/spec/设计-跨网络传输-webrtc.md`). The
+/// `writer` and `reader` must be independent handles to the *same* connection
+/// (e.g. a cloned socket); the security model (Noise KK bound to the trust
+/// store) is identical regardless of the underlying transport.
+pub(super) fn run_authenticated_session_over<W: Write, R: BufRead>(
+    mut writer: W,
+    mut reader: R,
+    local_identity: LocalIdentity,
+    trust_store: Arc<TrustStore>,
+    receive_dir: PathBuf,
+    on_file_received: Option<FileReceivedCallback>,
+) -> io::Result<()> {
     let mut line = String::new();
 
     if reader.read_line(&mut line)? == 0 {
@@ -435,10 +460,10 @@ pub(super) fn run_authenticated_session(
     }
 }
 
-pub(super) fn send_encrypted_with_ack_retries(
+pub(super) fn send_encrypted_with_ack_retries<W: Write, R: BufRead>(
     transport: &mut NoiseTransport,
-    writer: &mut TcpStream,
-    reader: &mut BufReader<TcpStream>,
+    writer: &mut W,
+    reader: &mut R,
     message_id: &str,
     expected_ack_status: &str,
     make_message: impl Fn() -> WireMessage,
@@ -489,10 +514,10 @@ pub(super) fn send_encrypted_with_ack_retries(
         .unwrap_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "ACK retry attempts exhausted")))
 }
 
-pub(super) fn send_encrypted_file_start_with_retries(
+pub(super) fn send_encrypted_file_start_with_retries<W: Write, R: BufRead>(
     transport: &mut NoiseTransport,
-    writer: &mut TcpStream,
-    reader: &mut BufReader<TcpStream>,
+    writer: &mut W,
+    reader: &mut R,
     transfer_id: &str,
     make_message: impl Fn() -> WireMessage,
 ) -> io::Result<u64> {
@@ -546,9 +571,9 @@ pub(super) fn send_encrypted_file_start_with_retries(
     }))
 }
 
-fn send_encrypted_frame(
+fn send_encrypted_frame<W: Write>(
     transport: &mut NoiseTransport,
-    writer: &mut TcpStream,
+    writer: &mut W,
     message: &WireMessage,
 ) -> io::Result<()> {
     let plaintext = serialize_message(message);
@@ -567,9 +592,9 @@ fn send_encrypted_frame(
     writer.flush()
 }
 
-fn recv_encrypted_frame(
+fn recv_encrypted_frame<R: BufRead>(
     transport: &mut NoiseTransport,
-    reader: &mut BufReader<TcpStream>,
+    reader: &mut R,
 ) -> io::Result<WireMessage> {
     let mut len_buf = [0u8; 2];
     reader.read_exact(&mut len_buf)?;
@@ -592,20 +617,44 @@ pub(super) fn open_authenticated_stream(
 ) -> io::Result<(TcpStream, BufReader<TcpStream>, NoiseTransport)> {
     let mut stream = TcpStream::connect(peer_addr)?;
     let mut reader = BufReader::new(stream.try_clone()?);
+    stream.set_read_timeout(Some(ACK_TIMEOUT))?;
+
+    let transport = perform_initiator_handshake(
+        &mut stream,
+        &mut reader,
+        local_identity,
+        peer_device_id,
+        peer_dh_public_key,
+    )?;
+
+    Ok((stream, reader, transport))
+}
+
+/// Transport-agnostic initiator handshake: plaintext HELLO → ed25519
+/// challenge/signature against the trust store → Noise KK, returning the
+/// established encrypted transport. Mirrors [`run_authenticated_session_over`]
+/// for the connecting side and works over any duplex stream (LAN socket today,
+/// WebRTC DataChannel / relay tunnel in stage 5).
+pub(super) fn perform_initiator_handshake<W: Write, R: BufRead>(
+    writer: &mut W,
+    reader: &mut R,
+    local_identity: &LocalIdentity,
+    peer_device_id: &str,
+    peer_dh_public_key: &[u8; 32],
+) -> io::Result<NoiseTransport> {
     let local = LocalDevice::new(local_identity.device_id(), local_identity.device_name());
 
-    write_message(&mut stream, &WireMessage::hello(&local))?;
-    stream.set_read_timeout(Some(ACK_TIMEOUT))?;
-    let nonce = wait_for_auth_challenge(&mut reader)?;
+    write_message(writer, &WireMessage::hello(&local))?;
+    let nonce = wait_for_auth_challenge(reader)?;
     let signature = local_identity
         .sign_handshake_challenge(peer_device_id, &nonce)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
 
     write_message(
-        &mut stream,
+        writer,
         &WireMessage::auth_signature(local_identity.device_id(), &signature),
     )?;
-    wait_for_ack(&mut reader, local_identity.device_id(), "AUTH_OK")?;
+    wait_for_ack(reader, local_identity.device_id(), "AUTH_OK")?;
 
     // --- Noise KK handshake (initiator side) ---
     let local_db_bytes = local_identity
@@ -618,10 +667,7 @@ pub(super) fn open_authenticated_stream(
     let init_payload = noise
         .write_message(&[])
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    write_message(
-        &mut stream,
-        &WireMessage::noise_hs(&encode_hex(&init_payload)),
-    )?;
+    write_message(writer, &WireMessage::noise_hs(&encode_hex(&init_payload)))?;
 
     // Step 2: Receive NOISE_HS from responder
     let mut noise_line = String::new();
@@ -675,10 +721,10 @@ pub(super) fn open_authenticated_stream(
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     println!("Noise KK handshake complete — encrypted session established");
 
-    Ok((stream, reader, transport))
+    Ok(transport)
 }
 
-fn wait_for_auth_challenge(reader: &mut BufReader<TcpStream>) -> io::Result<String> {
+fn wait_for_auth_challenge<R: BufRead>(reader: &mut R) -> io::Result<String> {
     loop {
         let mut response = String::new();
         let bytes_read = reader.read_line(&mut response)?;
@@ -715,8 +761,8 @@ fn wait_for_auth_challenge(reader: &mut BufReader<TcpStream>) -> io::Result<Stri
     }
 }
 
-fn wait_for_ack(
-    reader: &mut BufReader<TcpStream>,
+fn wait_for_ack<R: BufRead>(
+    reader: &mut R,
     expected_message_id: &str,
     expected_status: &str,
 ) -> io::Result<()> {
@@ -757,5 +803,188 @@ fn wait_for_ack(
                 ));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod transport_tests {
+    //! Proves the authenticated session is transport-agnostic by running the
+    //! full handshake + encrypted TEXT exchange over an in-memory duplex (no
+    //! sockets). This is the seam that stage-5 WebRTC / relay transports plug
+    //! into; the TCP path is exercised separately by `tests/e2e.rs`.
+
+    use super::*;
+    use crate::TrustedDevice;
+    use std::collections::VecDeque;
+    use std::io::Read;
+    use std::sync::{Condvar, Mutex};
+    use std::thread;
+    use std::time::SystemTime;
+
+    /// A blocking byte channel shared between a writer end and a reader end.
+    type MemChannel = Arc<(Mutex<MemState>, Condvar)>;
+
+    struct MemState {
+        buf: VecDeque<u8>,
+        closed: bool,
+    }
+
+    fn new_channel() -> MemChannel {
+        Arc::new((
+            Mutex::new(MemState {
+                buf: VecDeque::new(),
+                closed: false,
+            }),
+            Condvar::new(),
+        ))
+    }
+
+    /// One end of an in-memory full-duplex link. `rx` is what we read; `tx` is
+    /// what we write. Cloning shares the same underlying channels, so a writer
+    /// handle and a `BufReader`-wrapped reader handle stay wired together.
+    struct MemoryDuplex {
+        rx: MemChannel,
+        tx: MemChannel,
+    }
+
+    impl MemoryDuplex {
+        fn pair() -> (MemoryDuplex, MemoryDuplex) {
+            let a = new_channel();
+            let b = new_channel();
+            (
+                MemoryDuplex {
+                    rx: b.clone(),
+                    tx: a.clone(),
+                },
+                MemoryDuplex { rx: a, tx: b },
+            )
+        }
+
+        fn handle(&self) -> MemoryDuplex {
+            MemoryDuplex {
+                rx: self.rx.clone(),
+                tx: self.tx.clone(),
+            }
+        }
+
+        /// Signal EOF to the peer reading our `tx`.
+        fn close_tx(&self) {
+            let (lock, cvar) = &*self.tx;
+            lock.lock().unwrap().closed = true;
+            cvar.notify_all();
+        }
+    }
+
+    impl Read for MemoryDuplex {
+        fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+            let (lock, cvar) = &*self.rx;
+            let mut state = lock.lock().unwrap();
+            loop {
+                if !state.buf.is_empty() {
+                    let n = state.buf.len().min(out.len());
+                    for slot in out.iter_mut().take(n) {
+                        *slot = state.buf.pop_front().unwrap();
+                    }
+                    return Ok(n);
+                }
+                if state.closed {
+                    return Ok(0);
+                }
+                state = cvar.wait(state).unwrap();
+            }
+        }
+    }
+
+    impl Write for MemoryDuplex {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            let (lock, cvar) = &*self.tx;
+            let mut state = lock.lock().unwrap();
+            state.buf.extend(data.iter().copied());
+            cvar.notify_all();
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn dh_bytes(identity: &LocalIdentity) -> [u8; 32] {
+        decode_hex(identity.dh_public_key())
+            .unwrap()
+            .try_into()
+            .unwrap()
+    }
+
+    #[test]
+    fn authenticated_text_round_trips_over_in_memory_transport() {
+        let now = SystemTime::now();
+        let initiator = LocalIdentity::generate("Initiator", now);
+        let responder = LocalIdentity::generate("Responder", now);
+        let responder_dh = dh_bytes(&responder);
+
+        // Responder trusts the initiator (the side it authenticates by signature).
+        let mut trust = TrustStore::new();
+        trust.trust(TrustedDevice::new(initiator.identity().clone(), now));
+        let trust = Arc::new(trust);
+
+        let receive_dir = std::env::temp_dir().join(format!(
+            "linkhub-mem-{}-{:?}",
+            now.duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            thread::current().id()
+        ));
+
+        let (initiator_end, responder_end) = MemoryDuplex::pair();
+        let resp_writer = responder_end.handle();
+        let resp_reader = BufReader::new(responder_end.handle());
+
+        let responder_identity = responder.clone();
+        let receive_dir_for_thread = receive_dir.clone();
+        let responder_thread = thread::spawn(move || {
+            run_authenticated_session_over(
+                resp_writer,
+                resp_reader,
+                responder_identity,
+                trust,
+                receive_dir_for_thread,
+                None,
+            )
+        });
+
+        // Initiator side over the same in-memory link.
+        let mut init_writer = initiator_end.handle();
+        let mut init_reader = BufReader::new(initiator_end.handle());
+        let mut transport = perform_initiator_handshake(
+            &mut init_writer,
+            &mut init_reader,
+            &initiator,
+            responder.device_id(),
+            &responder_dh,
+        )
+        .expect("initiator handshake should complete over memory transport");
+
+        let message_id = format!("{}-mem-1", initiator.device_id());
+        send_encrypted_with_ack_retries(
+            &mut transport,
+            &mut init_writer,
+            &mut init_reader,
+            &message_id,
+            "TEXT_RECEIVED",
+            || WireMessage::text(&message_id, "hello over in-memory transport"),
+            "TEXT",
+        )
+        .expect("encrypted TEXT should be acknowledged over memory transport");
+
+        // Close the link so the responder's receive loop ends cleanly.
+        init_writer.close_tx();
+        let responder_result = responder_thread.join().expect("responder thread panicked");
+        assert!(
+            responder_result.is_ok(),
+            "responder session should end Ok on EOF, got {responder_result:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&receive_dir);
     }
 }

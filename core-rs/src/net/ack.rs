@@ -7,7 +7,7 @@ use super::protocol::{parse_message, serialize_message, WireMessage};
 pub(super) const ACK_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_ACK_ATTEMPTS: u32 = 3;
 
-pub(super) fn write_message(writer: &mut TcpStream, message: &WireMessage) -> io::Result<()> {
+pub(super) fn write_message<W: Write>(writer: &mut W, message: &WireMessage) -> io::Result<()> {
     writeln!(writer, "{}", serialize_message(message))?;
     writer.flush()
 }
