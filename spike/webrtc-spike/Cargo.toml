@@ -1,0 +1,12 @@
+[package]
+name = "webrtc-spike"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+# Full webrtc-rs stack: ICE/STUN/TURN/DTLS/DataChannel — this is route A in the
+# design doc. We only need DataChannel + ICE, but the crate pulls the whole stack.
+[dependencies]
+webrtc = "0.11"

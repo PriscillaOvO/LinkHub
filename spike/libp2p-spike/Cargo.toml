@@ -1,0 +1,25 @@
+[package]
+name = "libp2p-spike"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+# Features chosen to mirror what the cross-network design actually needs:
+# hole punching (dcutr), circuit relay v2 (relay), noise encryption, identify,
+# tcp + quic transports, yamux muxing, dns, ping. tokio runtime.
+[dependencies]
+libp2p = { version = "0.54", features = [
+    "tcp",
+    "quic",
+    "dns",
+    "noise",
+    "yamux",
+    "dcutr",
+    "relay",
+    "identify",
+    "ping",
+    "macros",
+    "tokio",
+] }
