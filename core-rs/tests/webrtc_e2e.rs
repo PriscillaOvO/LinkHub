@@ -17,7 +17,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::SystemTime;
 
-use linkhub_core::net::webrtc_transport::{accept_responder, connect_initiator, SdpSignal};
+use linkhub_core::net::webrtc_transport::{
+    accept_responder, connect_initiator, IceConfig, SdpSignal,
+};
 use linkhub_core::{
     decode_hex, run_authenticated_file_sender_over, run_authenticated_responder_over,
     FileReceivedCallback, LocalIdentity, ReceivedFileEvent, TrustStore, TrustedDevice,
@@ -70,8 +72,8 @@ fn noise_file_transfer_over_webrtc_datachannel() {
     let (r2i_tx, r2i_rx) = unbounded_channel::<SdpSignal>();
 
     // Establish both ends concurrently (no STUN needed on loopback).
-    let init_fut = connect_initiator(vec![], i2r_tx, r2i_rx, handle.clone());
-    let resp_fut = accept_responder(vec![], r2i_tx, i2r_rx, handle.clone());
+    let init_fut = connect_initiator(IceConfig::default(), i2r_tx, r2i_rx, handle.clone());
+    let resp_fut = accept_responder(IceConfig::default(), r2i_tx, i2r_rx, handle.clone());
     let (init_duplex, resp_duplex) = rt.block_on(async move { tokio::join!(init_fut, resp_fut) });
     let init_duplex = init_duplex.expect("initiator establishes DataChannel");
     let resp_duplex = resp_duplex.expect("responder establishes DataChannel");

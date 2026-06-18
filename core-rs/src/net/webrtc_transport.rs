@@ -27,8 +27,10 @@ use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
+use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
+use webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
@@ -44,6 +46,65 @@ const ESTABLISH_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct SdpSignal {
     pub is_offer: bool,
     pub sdp: String,
+}
+
+/// One STUN or TURN server for ICE. STUN servers leave `username`/`credential`
+/// empty; TURN servers carry long-term credentials (design §7: short-lived,
+/// per-session).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IceServer {
+    pub urls: Vec<String>,
+    pub username: String,
+    pub credential: String,
+}
+
+impl IceServer {
+    /// A STUN server (no credentials).
+    pub fn stun(url: impl Into<String>) -> Self {
+        Self {
+            urls: vec![url.into()],
+            ..Default::default()
+        }
+    }
+
+    /// A TURN server with long-term credentials.
+    pub fn turn(
+        url: impl Into<String>,
+        username: impl Into<String>,
+        credential: impl Into<String>,
+    ) -> Self {
+        Self {
+            urls: vec![url.into()],
+            username: username.into(),
+            credential: credential.into(),
+        }
+    }
+}
+
+/// ICE configuration for one connection attempt (M4): the STUN/TURN servers to
+/// use, plus whether to force **relay-only** candidates. `force_relay` rejects
+/// host/server-reflexive candidates so the connection can only succeed through a
+/// TURN relay — used both to validate the TURN fallback and as the deliberate
+/// `CloudRelay` path when hole-punching is known to fail
+/// (see [`crate::net::ConnectionPath::CloudRelay`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IceConfig {
+    pub servers: Vec<IceServer>,
+    pub force_relay: bool,
+}
+
+impl IceConfig {
+    /// A plain list of STUN URLs, no relay forcing (the common hole-punch case).
+    pub fn from_stun_urls(urls: Vec<String>) -> Self {
+        Self {
+            servers: urls
+                .into_iter()
+                .filter(|url| !url.is_empty())
+                .map(IceServer::stun)
+                .collect(),
+            force_relay: false,
+        }
+    }
 }
 
 struct Inbound {
@@ -121,12 +182,12 @@ impl Write for DataChannelDuplex {
 /// Initiator side: create the DataChannel, send an offer, accept the answer,
 /// return once the channel is open.
 pub async fn connect_initiator(
-    ice_urls: Vec<String>,
+    ice: IceConfig,
     sdp_out: UnboundedSender<SdpSignal>,
     mut sdp_in: UnboundedReceiver<SdpSignal>,
     handle: Handle,
 ) -> io::Result<DataChannelDuplex> {
-    let pc = new_peer_connection(&ice_urls).await?;
+    let pc = new_peer_connection(&ice).await?;
     let dc = pc
         .create_data_channel("linkhub", None)
         .await
@@ -156,12 +217,12 @@ pub async fn connect_initiator(
 /// Responder side: accept an offer, send back an answer, return once the
 /// peer-created DataChannel is open.
 pub async fn accept_responder(
-    ice_urls: Vec<String>,
+    ice: IceConfig,
     sdp_out: UnboundedSender<SdpSignal>,
     mut sdp_in: UnboundedReceiver<SdpSignal>,
     handle: Handle,
 ) -> io::Result<DataChannelDuplex> {
-    let pc = new_peer_connection(&ice_urls).await?;
+    let pc = new_peer_connection(&ice).await?;
 
     let (dc_tx, dc_rx) = oneshot::channel::<Arc<RTCDataChannel>>();
     let dc_tx = Arc::new(Mutex::new(Some(dc_tx)));
@@ -199,20 +260,37 @@ pub async fn accept_responder(
     attach_and_open(pc, dc, handle).await
 }
 
-async fn new_peer_connection(ice_urls: &[String]) -> io::Result<Arc<RTCPeerConnection>> {
+async fn new_peer_connection(ice: &IceConfig) -> io::Result<Arc<RTCPeerConnection>> {
     let api = APIBuilder::new().build();
-    let ice_servers = if ice_urls.is_empty() {
-        Vec::new()
-    } else {
-        vec![RTCIceServer {
-            urls: ice_urls.to_vec(),
-            ..Default::default()
-        }]
-    };
-    let config = RTCConfiguration {
+    let ice_servers = ice
+        .servers
+        .iter()
+        .filter(|server| !server.urls.is_empty())
+        .map(|server| {
+            // TURN servers (carrying credentials) need credential_type=Password;
+            // the default Unspecified is rejected as "invalid turn credentials".
+            let credential_type = if server.credential.is_empty() {
+                RTCIceCredentialType::Unspecified
+            } else {
+                RTCIceCredentialType::Password
+            };
+            RTCIceServer {
+                urls: server.urls.clone(),
+                username: server.username.clone(),
+                credential: server.credential.clone(),
+                credential_type,
+            }
+        })
+        .collect();
+    let mut config = RTCConfiguration {
         ice_servers,
         ..Default::default()
     };
+    if ice.force_relay {
+        // Relay-only: refuse host/srflx candidates, force traffic through a TURN
+        // relay (validates the TURN fallback / the CloudRelay path).
+        config.ice_transport_policy = RTCIceTransportPolicy::Relay;
+    }
     let pc = api.new_peer_connection(config).await.map_err(webrtc_io)?;
     Ok(Arc::new(pc))
 }

@@ -25,7 +25,9 @@ use linkhub_core::{
 };
 
 #[cfg(feature = "webrtc")]
-use linkhub_core::net::webrtc_transport::{accept_responder, connect_initiator, SdpSignal};
+use linkhub_core::net::webrtc_transport::{
+    accept_responder, connect_initiator, IceConfig, IceServer, SdpSignal,
+};
 
 fn main() -> ExitCode {
     match run() {
@@ -927,7 +929,7 @@ struct ListenWebRtcArgs {
     identity_path: String,
     trust_store_path: String,
     receive_dir: String,
-    ice_urls: Vec<String>,
+    ice: IceConfig,
 }
 
 #[cfg(feature = "webrtc")]
@@ -937,7 +939,7 @@ struct ConnectWebRtcArgs {
     peer_device_id: String,
     trust_store_path: String,
     path: String,
-    ice_urls: Vec<String>,
+    ice: IceConfig,
 }
 
 #[cfg(feature = "webrtc")]
@@ -945,46 +947,79 @@ struct WebRtcOptions {
     positional: Vec<String>,
     receive_dir: Option<String>,
     ice_urls: Vec<String>,
+    turn_username: Option<String>,
+    turn_credential: Option<String>,
+    relay_only: bool,
+}
+
+#[cfg(feature = "webrtc")]
+impl WebRtcOptions {
+    /// Build the [`IceConfig`] from the parsed flags: `--ice` URLs starting with
+    /// `turn:`/`turns:` become TURN servers (using `--turn-username` /
+    /// `--turn-credential`), the rest STUN servers; `--relay-only` forces relay.
+    fn to_ice_config(&self) -> IceConfig {
+        let username = self.turn_username.clone().unwrap_or_default();
+        let credential = self.turn_credential.clone().unwrap_or_default();
+        let servers = self
+            .ice_urls
+            .iter()
+            .filter(|url| !url.is_empty())
+            .map(|url| {
+                if url.starts_with("turn:") || url.starts_with("turns:") {
+                    IceServer::turn(url.clone(), username.clone(), credential.clone())
+                } else {
+                    IceServer::stun(url.clone())
+                }
+            })
+            .collect();
+        IceConfig {
+            servers,
+            force_relay: self.relay_only,
+        }
+    }
 }
 
 #[cfg(feature = "webrtc")]
 fn parse_listen_webrtc_args(args: &[String]) -> Result<ListenWebRtcArgs, String> {
     let shape =
-        "listen-webrtc <ws_url> <identity_path> <trust_store_path> [--receive-dir <dir>] [--ice <url>...]";
+        "listen-webrtc <ws_url> <identity_path> <trust_store_path> [--receive-dir <dir>] [--ice <url>...] [--turn-username <u>] [--turn-credential <p>] [--relay-only]";
     let options = split_webrtc_options(args, shape, true)?;
 
     if options.positional.len() != 3 {
         return Err(format!("usage: {}", command_usage(shape)));
     }
 
+    let ice = options.to_ice_config();
     Ok(ListenWebRtcArgs {
         ws_url: options.positional[0].clone(),
         identity_path: options.positional[1].clone(),
         trust_store_path: options.positional[2].clone(),
         receive_dir: options
             .receive_dir
+            .clone()
             .unwrap_or_else(|| "received".to_string()),
-        ice_urls: options.ice_urls,
+        ice,
     })
 }
 
 #[cfg(feature = "webrtc")]
 fn parse_connect_webrtc_args(args: &[String]) -> Result<ConnectWebRtcArgs, String> {
     let shape =
-        "connect-webrtc <ws_url> <identity_path> <peer_device_id> <trust_store_path> <file_path> [--ice <url>...]";
+        "connect-webrtc <ws_url> <identity_path> <peer_device_id> <trust_store_path> <file_path> [--ice <url>...] [--turn-username <u>] [--turn-credential <p>] [--relay-only]";
     let options = split_webrtc_options(args, shape, false)?;
 
     if options.receive_dir.is_some() || options.positional.len() < 5 {
         return Err(format!("usage: {}", command_usage(shape)));
     }
 
+    let ice = options.to_ice_config();
     Ok(ConnectWebRtcArgs {
         ws_url: options.positional[0].clone(),
         identity_path: options.positional[1].clone(),
         peer_device_id: options.positional[2].clone(),
         trust_store_path: options.positional[3].clone(),
         path: options.positional[4..].join(" "),
-        ice_urls: options.ice_urls,
+        ice,
     })
 }
 
@@ -997,6 +1032,9 @@ fn split_webrtc_options(
     let mut positional = Vec::new();
     let mut receive_dir = None;
     let mut ice_urls = Vec::new();
+    let mut turn_username = None;
+    let mut turn_credential = None;
+    let mut relay_only = false;
     let mut index = 0;
 
     while index < args.len() {
@@ -1021,6 +1059,28 @@ fn split_webrtc_options(
                 ice_urls.push(value.clone());
                 index += 2;
             }
+            "--turn-username" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(format!("usage: {}", command_usage(shape)));
+                };
+                if turn_username.replace(value.clone()).is_some() {
+                    return Err("--turn-username can only be provided once".to_string());
+                }
+                index += 2;
+            }
+            "--turn-credential" => {
+                let Some(value) = args.get(index + 1) else {
+                    return Err(format!("usage: {}", command_usage(shape)));
+                };
+                if turn_credential.replace(value.clone()).is_some() {
+                    return Err("--turn-credential can only be provided once".to_string());
+                }
+                index += 2;
+            }
+            "--relay-only" => {
+                relay_only = true;
+                index += 1;
+            }
             value => {
                 positional.push(value.to_string());
                 index += 1;
@@ -1032,6 +1092,9 @@ fn split_webrtc_options(
         positional,
         receive_dir,
         ice_urls,
+        turn_username,
+        turn_credential,
+        relay_only,
     })
 }
 
@@ -1124,7 +1187,7 @@ fn run_listen_webrtc_command(args: &[String]) -> Result<(), String> {
         identity,
         trust_store,
         parsed.receive_dir,
-        parsed.ice_urls,
+        parsed.ice,
     )
 }
 
@@ -1148,7 +1211,7 @@ fn run_connect_webrtc_command(args: &[String]) -> Result<(), String> {
         peer_identity,
         peer_dh_key_bytes,
         parsed.path,
-        parsed.ice_urls,
+        parsed.ice,
     )
 }
 
@@ -1159,7 +1222,7 @@ fn run_connect_webrtc(
     peer_identity: DeviceIdentity,
     peer_dh_public_key: [u8; 32],
     path: String,
-    ice_urls: Vec<String>,
+    ice: IceConfig,
 ) -> Result<(), String> {
     let runtime = new_webrtc_runtime()?;
     let handle = runtime.handle().clone();
@@ -1185,12 +1248,7 @@ fn run_connect_webrtc(
     );
     let _ = std::io::stdout().flush();
 
-    let established = runtime.block_on(connect_initiator(
-        ice_urls,
-        local_sdp_tx,
-        remote_sdp_rx,
-        handle,
-    ));
+    let established = runtime.block_on(connect_initiator(ice, local_sdp_tx, remote_sdp_rx, handle));
     let bridge_result = bridge.stop();
     let duplex = finish_webrtc_establishment(established, bridge_result)?;
 
@@ -1220,7 +1278,7 @@ fn run_listen_webrtc(
     identity: LocalIdentity,
     trust_store: Arc<TrustStore>,
     receive_dir: String,
-    ice_urls: Vec<String>,
+    ice: IceConfig,
 ) -> Result<(), String> {
     let runtime = new_webrtc_runtime()?;
     let handle = runtime.handle().clone();
@@ -1244,12 +1302,7 @@ fn run_listen_webrtc(
     println!("Waiting for a trusted WebRTC offer...");
     let _ = std::io::stdout().flush();
 
-    let established = runtime.block_on(accept_responder(
-        ice_urls,
-        local_sdp_tx,
-        remote_sdp_rx,
-        handle,
-    ));
+    let established = runtime.block_on(accept_responder(ice, local_sdp_tx, remote_sdp_rx, handle));
     let bridge_result = bridge.stop();
     let duplex = finish_webrtc_establishment(established, bridge_result)?;
 
@@ -1992,12 +2045,43 @@ mod tests {
         assert_eq!(parsed.trust_store_path, "receiver-trust-store.txt");
         assert_eq!(parsed.receive_dir, "C:\\LinkHub\\webrtc-inbox");
         assert_eq!(
-            parsed.ice_urls,
+            parsed.ice.servers,
             vec![
-                "stun:stun.l.google.com:19302".to_string(),
-                "turn:turn.example.com:3478".to_string()
+                IceServer::stun("stun:stun.l.google.com:19302"),
+                IceServer::stun("turn:turn.example.com:3478"),
             ]
         );
+        assert!(!parsed.ice.force_relay);
+    }
+
+    #[cfg(feature = "webrtc")]
+    #[test]
+    fn listen_webrtc_args_build_turn_servers_and_relay_only() {
+        let parsed = parse_listen_webrtc_args(&args(&[
+            "ws://127.0.0.1:9000",
+            "receiver-identity.txt",
+            "receiver-trust-store.txt",
+            "--ice",
+            "stun:stun.l.google.com:19302",
+            "--ice",
+            "turn:turn.example.com:3478",
+            "--turn-username",
+            "linkhub",
+            "--turn-credential",
+            "s3cret",
+            "--relay-only",
+        ]))
+        .unwrap();
+
+        // STUN URLs stay credential-free; turn:/turns: URLs pick up the creds.
+        assert_eq!(
+            parsed.ice.servers,
+            vec![
+                IceServer::stun("stun:stun.l.google.com:19302"),
+                IceServer::turn("turn:turn.example.com:3478", "linkhub", "s3cret"),
+            ]
+        );
+        assert!(parsed.ice.force_relay);
     }
 
     #[cfg(feature = "webrtc")]
@@ -2021,9 +2105,10 @@ mod tests {
         assert_eq!(parsed.trust_store_path, "sender-trust-store.txt");
         assert_eq!(parsed.path, "C:\\LinkHub\\send sample file.txt");
         assert_eq!(
-            parsed.ice_urls,
-            vec!["stun:stun.l.google.com:19302".to_string()]
+            parsed.ice.servers,
+            vec![IceServer::stun("stun:stun.l.google.com:19302")]
         );
+        assert!(!parsed.ice.force_relay);
     }
 
     #[test]
