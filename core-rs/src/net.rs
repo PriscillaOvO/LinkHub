@@ -17,6 +17,7 @@ mod protocol;
 mod session;
 mod signaling_client;
 mod signaling_signed;
+mod signaling_supervisor;
 #[cfg(feature = "webrtc")]
 pub mod webrtc_session;
 #[cfg(feature = "webrtc")]
@@ -45,6 +46,9 @@ pub use connection_plan::{
 };
 pub use signaling_client::{RetryPolicy, SignalingClient, SignalingDelivery, SignalingEvent};
 pub use signaling_signed::{open_sdp, seal_sdp, verify_signaling_sdp};
+pub use signaling_supervisor::{
+    SignalingSupervisor, SignalingSupervisorConfig, SignalingSupervisorEvent,
+};
 
 const RECEIVED_DIR: &str = "received";
 

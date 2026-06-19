@@ -39,7 +39,8 @@ pub use net::{
     run_connector_with_receive_dir, run_file_control_sender, run_file_sender, run_listener,
     run_listener_with_receive_dir, run_text_sender, seal_sdp, verify_signaling_sdp, ConnectionPath,
     ConnectionPlan, FileReceivedCallback, LocalDevice, PeerReachability, ReceivedFileEvent,
-    RetryPolicy, SignalingClient, SignalingDelivery, SignalingEvent,
+    RetryPolicy, SignalingClient, SignalingDelivery, SignalingEvent, SignalingSupervisor,
+    SignalingSupervisorConfig, SignalingSupervisorEvent,
 };
 pub use presence::ConnectionState;
 pub use transport::{HeartbeatUpdate, TransportHealth, TransportKind};

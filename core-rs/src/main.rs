@@ -17,8 +17,8 @@ use linkhub_core::{
     run_connector_with_receive_dir, run_file_control_sender, run_file_sender,
     run_listener_with_receive_dir, run_text_sender, DeviceAgent, DeviceIdentity, DeviceNode,
     DiscoveryEndpoint, HeartbeatUpdate, LocalDevice, LocalIdentity, MdnsAdvertisement, MdnsRuntime,
-    PairingInvitation, PairingSession, SignalingClient, SignalingEvent, TransportKind, TrustStore,
-    TrustedDevice,
+    PairingInvitation, PairingSession, SignalingClient, SignalingSupervisor,
+    SignalingSupervisorConfig, SignalingSupervisorEvent, TransportKind, TrustStore, TrustedDevice,
 };
 
 #[cfg(feature = "webrtc")]
@@ -1094,19 +1094,26 @@ fn split_webrtc_options(
 }
 
 fn run_signal_listen(ws_url: &str, identity: LocalIdentity) -> Result<(), String> {
-    let mut client = SignalingClient::connect(ws_url, &identity)
-        .map_err(|err| format!("failed to connect to signaling server {ws_url}: {err}"))?;
+    let supervisor =
+        SignalingSupervisor::start(SignalingSupervisorConfig::new(ws_url, identity.clone()));
+    let events = supervisor.events();
 
     println!(
-        "Signaling: present as device_id={} public_key={}",
-        client.device_id(),
-        client.public_key_hex()
+        "Signaling supervisor starting for device_id={} public_key={}",
+        identity.device_id(),
+        identity.public_key()
     );
-    println!("Waiting for signaling deliveries (Ctrl-C to stop)...");
+    println!("Waiting for signaling deliveries with automatic reconnect (Ctrl-C to stop)...");
 
-    loop {
-        match client.recv() {
-            Ok(SignalingEvent::Delivery(delivery)) => {
+    while let Ok(event) = events.recv() {
+        match event {
+            SignalingSupervisorEvent::Connected {
+                device_id,
+                public_key_hex,
+            } => {
+                println!("Signaling: present as device_id={device_id} public_key={public_key_hex}");
+            }
+            SignalingSupervisorEvent::Delivery(delivery) => {
                 println!(
                     "Signaling delivery from device_id={} public_key={} session={} kind={} payload_hex={}",
                     delivery.from_device_id,
@@ -1116,14 +1123,19 @@ fn run_signal_listen(ws_url: &str, identity: LocalIdentity) -> Result<(), String
                     delivery.payload_hex
                 );
             }
-            Ok(SignalingEvent::ServerError(reason)) => {
+            SignalingSupervisorEvent::ServerError(reason) => {
                 println!("Signaling server error: {reason}");
             }
-            Err(err) => {
-                return Err(format!("signaling connection ended: {err}"));
+            SignalingSupervisorEvent::Disconnected(reason) => {
+                eprintln!("Signaling disconnected; will retry: {reason}");
+            }
+            SignalingSupervisorEvent::Stopped => {
+                break;
             }
         }
     }
+
+    Ok(())
 }
 
 fn run_signal_relay(

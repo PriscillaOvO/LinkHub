@@ -5,10 +5,16 @@
 
 use std::net::SocketAddr;
 use std::sync::mpsc;
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime};
 
-use linkhub_core::{LocalIdentity, RetryPolicy, SignalingClient, SignalingEvent};
+use linkhub_core::{
+    LocalIdentity, RetryPolicy, SignalingClient, SignalingEvent, SignalingSupervisor,
+    SignalingSupervisorConfig, SignalingSupervisorEvent,
+};
+use linkhub_signaling_server::auth::{new_nonce, verify_login};
+use linkhub_signaling_server::protocol::{ClientMsg, ServerMsg};
+use tungstenite::{accept, Message, WebSocket};
 
 /// Spin up the signaling server on an ephemeral port in its own tokio runtime
 /// thread; return the `ws://` URL once it is listening.
@@ -30,6 +36,111 @@ fn start_server() -> String {
         .recv_timeout(Duration::from_secs(5))
         .expect("server reports its address");
     format!("ws://{addr}")
+}
+
+fn start_drop_then_route_server() -> (String, JoinHandle<()>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake server");
+    let addr = listener.local_addr().expect("fake server addr");
+    let handle = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("first bob connection");
+        let (_, _, mut first_bob) = accept_authenticated(stream);
+        first_bob.close(None).expect("close first bob connection");
+
+        let (stream, _) = listener.accept().expect("second bob connection");
+        let (bob_device_id, bob_public_key_hex, mut second_bob) = accept_authenticated(stream);
+
+        let (stream, _) = listener.accept().expect("alice connection");
+        let (alice_device_id, alice_public_key_hex, mut alice) = accept_authenticated(stream);
+        let (session_id, kind, payload_hex) = loop {
+            match read_client_msg(&mut alice) {
+                ClientMsg::Forward {
+                    to_public_key_hex,
+                    session_id,
+                    kind,
+                    payload_hex,
+                } => {
+                    assert_eq!(to_public_key_hex, bob_public_key_hex);
+                    break (session_id, kind, payload_hex);
+                }
+                ClientMsg::Ping => {
+                    send_server_msg(&mut alice, &ServerMsg::Pong);
+                }
+                other => panic!("unexpected alice message: {other:?}"),
+            }
+        };
+
+        send_server_msg(
+            &mut second_bob,
+            &ServerMsg::Deliver {
+                from_public_key_hex: alice_public_key_hex,
+                from_device_id: alice_device_id,
+                session_id,
+                kind,
+                payload_hex,
+            },
+        );
+        let _ = second_bob.close(None);
+        let _ = alice.close(None);
+        drop(bob_device_id);
+    });
+
+    (format!("ws://{addr}"), handle)
+}
+
+fn accept_authenticated(
+    stream: std::net::TcpStream,
+) -> (String, String, WebSocket<std::net::TcpStream>) {
+    let mut ws = accept(stream).expect("accept websocket");
+    let nonce = new_nonce();
+    send_server_msg(
+        &mut ws,
+        &ServerMsg::Challenge {
+            nonce: nonce.clone(),
+        },
+    );
+
+    let (device_id, public_key_hex) = match read_client_msg(&mut ws) {
+        ClientMsg::Auth {
+            device_id,
+            public_key_hex,
+            signature_hex,
+        } => {
+            verify_login(&public_key_hex, &nonce, &signature_hex).expect("valid auth signature");
+            (device_id, public_key_hex)
+        }
+        other => panic!("expected auth, got {other:?}"),
+    };
+
+    send_server_msg(
+        &mut ws,
+        &ServerMsg::Welcome {
+            device_id: device_id.clone(),
+        },
+    );
+    (device_id, public_key_hex, ws)
+}
+
+fn read_client_msg(ws: &mut WebSocket<std::net::TcpStream>) -> ClientMsg {
+    loop {
+        match ws.read().expect("read client frame") {
+            Message::Text(text) => return ClientMsg::from_json(&text).expect("client json"),
+            Message::Binary(bytes) => {
+                let text = String::from_utf8(bytes).expect("utf8 binary client frame");
+                return ClientMsg::from_json(&text).expect("client json");
+            }
+            Message::Ping(payload) => {
+                ws.send(Message::Pong(payload)).expect("pong");
+            }
+            Message::Pong(_) | Message::Frame(_) => {}
+            Message::Close(_) => panic!("client closed unexpectedly"),
+        }
+    }
+}
+
+fn send_server_msg(ws: &mut WebSocket<std::net::TcpStream>, msg: &ServerMsg) {
+    ws.send(Message::Text(msg.to_json()))
+        .expect("send server msg");
+    ws.flush().expect("flush server msg");
 }
 
 #[test]
@@ -119,6 +230,67 @@ fn connect_with_backoff_succeeds_against_live_server_and_heartbeat_keeps_link() 
         }
         other => panic!("expected delivery after heartbeat, got {other:?}"),
     }
+}
+
+#[test]
+fn supervisor_recovers_presence_after_connection_drop_and_receives_forward() {
+    let (url, server_handle) = start_drop_then_route_server();
+    let now = SystemTime::now();
+    let alice = LocalIdentity::generate("Alice", now);
+    let bob = LocalIdentity::generate("Bob", now);
+
+    let mut config = SignalingSupervisorConfig::new(url.clone(), bob.clone());
+    config.retry_policy = RetryPolicy {
+        max_attempts: 5,
+        base_delay: Duration::from_millis(10),
+        max_delay: Duration::from_millis(20),
+    };
+    config.read_timeout = Duration::from_millis(20);
+    config.heartbeat_interval = Duration::from_secs(30);
+
+    let supervisor = SignalingSupervisor::start(config);
+    let events = supervisor.events();
+
+    let mut connected_count = 0;
+    let mut saw_disconnect = false;
+    while connected_count < 2 {
+        match events
+            .recv_timeout(Duration::from_secs(5))
+            .expect("supervisor event")
+        {
+            SignalingSupervisorEvent::Connected { public_key_hex, .. } => {
+                assert_eq!(public_key_hex, bob.public_key());
+                connected_count += 1;
+            }
+            SignalingSupervisorEvent::Disconnected(_) => {
+                saw_disconnect = true;
+            }
+            other => panic!("unexpected event before reconnect: {other:?}"),
+        }
+    }
+    assert!(saw_disconnect, "first connection should have been dropped");
+
+    let mut alice_client = SignalingClient::connect(&url, &alice).expect("alice connects");
+    alice_client
+        .send_signaling(bob.public_key(), "sess-reconnect", "offer", "cafe")
+        .expect("alice forwards after bob reconnects");
+
+    match events
+        .recv_timeout(Duration::from_secs(5))
+        .expect("delivery after reconnect")
+    {
+        SignalingSupervisorEvent::Delivery(delivery) => {
+            assert_eq!(delivery.from_public_key_hex, alice.public_key());
+            assert_eq!(delivery.from_device_id, alice.device_id());
+            assert_eq!(delivery.session_id, "sess-reconnect");
+            assert_eq!(delivery.kind, "offer");
+            assert_eq!(delivery.payload_hex, "cafe");
+        }
+        other => panic!("expected delivery after reconnect, got {other:?}"),
+    }
+
+    supervisor.stop();
+    server_handle.join().expect("fake server exits");
 }
 
 #[test]
