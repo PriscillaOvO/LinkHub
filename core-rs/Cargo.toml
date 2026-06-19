@@ -13,6 +13,14 @@ crate-type = ["lib", "cdylib", "staticlib"]
 name = "linkhub-cli"
 path = "src/main.rs"
 
+# Dev-only standalone TURN relay for local cross-network validation. Gated on the
+# `webrtc` feature so the default build/test matrix and the Android .so are
+# unaffected. Run with `cargo run --features webrtc --bin turn-dev-server`.
+[[bin]]
+name = "turn-dev-server"
+path = "src/bin/turn_dev_server.rs"
+required-features = ["webrtc"]
+
 [features]
 # Cross-network WebRTC transport (Stage 5 / M3). Off by default so the standard
 # build, the Android .so, and the existing test matrix stay lean and unchanged;
