@@ -293,6 +293,204 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_sendFile(
     }
 }
 
+// ── Cross-network (WebRTC) — T7 ────────────────────────────────────
+//
+// The function symbols are always exported so Kotlin's `external fun` links in
+// every build; the body is gated on the `webrtc` feature. A default `.so`
+// (webrtc off) keeps these as small stubs returning an error, so the standard
+// Android build does not pull webrtc-rs/tokio and stays lean. Build with
+// `cargo ndk -P 24 ... build --features webrtc` (minSdk 24 — webrtc-rs needs
+// getifaddrs) to ship the real cross-network path.
+
+#[no_mangle]
+pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_webrtcSendFile(
+    mut env: JNIEnv,
+    _class: JClass,
+    identity_json: JString,
+    trust_store_path: JString,
+    peer_device_id: JString,
+    signaling_url: JString,
+    ice_config_json: JString,
+    file_path: JString,
+) -> jstring {
+    let result = (|| -> Result<String, String> {
+        install_panic_hook();
+        let json = get_string(&mut env, &identity_json);
+        let ts_path = get_string(&mut env, &trust_store_path);
+        let peer_id = get_string(&mut env, &peer_device_id);
+        let url = get_string(&mut env, &signaling_url);
+        let ice_json = get_string(&mut env, &ice_config_json);
+        let path = get_string(&mut env, &file_path);
+        webrtc_send_file_impl(json, ts_path, peer_id, url, ice_json, path)
+    })();
+    match result {
+        Ok(s) => make_string(&mut env, &s),
+        Err(e) => make_string(&mut env, &err_json(&e)),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_webrtcReceiveFile(
+    mut env: JNIEnv,
+    _class: JClass,
+    identity_json: JString,
+    trust_store_path: JString,
+    signaling_url: JString,
+    ice_config_json: JString,
+    receive_dir: JString,
+) -> jstring {
+    let result = (|| -> Result<String, String> {
+        install_panic_hook();
+        let json = get_string(&mut env, &identity_json);
+        let ts_path = get_string(&mut env, &trust_store_path);
+        let url = get_string(&mut env, &signaling_url);
+        let ice_json = get_string(&mut env, &ice_config_json);
+        let dir = get_string(&mut env, &receive_dir);
+        // Build the onFileReceived callback on this (JNI) thread, where the app
+        // class loader is reachable — same as the LAN listener.
+        let vm = env
+            .get_java_vm()
+            .map_err(|e| format!("failed to get JVM handle: {e}"))?;
+        let bridge_class = env
+            .find_class("com/linkhub/app/bridge/RustBridge")
+            .map_err(|e| format!("failed to find RustBridge class: {e}"))?;
+        let class_ref = env
+            .new_global_ref(bridge_class)
+            .map_err(|e| format!("failed to pin RustBridge class: {e}"))?;
+        let on_file = make_file_received_callback(vm, class_ref);
+        webrtc_receive_file_impl(json, ts_path, url, ice_json, dir, on_file)
+    })();
+    match result {
+        Ok(s) => make_string(&mut env, &s),
+        Err(e) => make_string(&mut env, &err_json(&e)),
+    }
+}
+
+#[cfg(not(feature = "webrtc"))]
+fn webrtc_send_file_impl(
+    _identity_json: String,
+    _trust_store_path: String,
+    _peer_device_id: String,
+    _signaling_url: String,
+    _ice_config_json: String,
+    _file_path: String,
+) -> Result<String, String> {
+    Err("cross-network WebRTC unavailable: build the .so with --features webrtc".into())
+}
+
+#[cfg(not(feature = "webrtc"))]
+fn webrtc_receive_file_impl(
+    _identity_json: String,
+    _trust_store_path: String,
+    _signaling_url: String,
+    _ice_config_json: String,
+    _receive_dir: String,
+    _on_file: FileReceivedCallback,
+) -> Result<String, String> {
+    Err("cross-network WebRTC unavailable: build the .so with --features webrtc".into())
+}
+
+#[cfg(feature = "webrtc")]
+fn webrtc_send_file_impl(
+    identity_json: String,
+    trust_store_path: String,
+    peer_device_id: String,
+    signaling_url: String,
+    ice_config_json: String,
+    file_path: String,
+) -> Result<String, String> {
+    let jni: JniIdentity = serde_json::from_str(&identity_json).map_err(|e| format!("{e}"))?;
+    let local = to_local_identity(&jni)?;
+    let trust = TrustStore::load_from_path(&trust_store_path).map_err(|e| format!("{e}"))?;
+    let peer = trust
+        .trusted_device(&peer_device_id)
+        .map(|trusted| trusted.identity().clone())
+        .ok_or_else(|| format!("peer device not trusted: {peer_device_id}"))?;
+    let ice = parse_ice_config(&ice_config_json)?;
+    crate::net::webrtc_session::send_file_over_webrtc(
+        &signaling_url,
+        &local,
+        &peer,
+        ice,
+        &file_path,
+    )
+    .map_err(|e| format!("webrtc send failed: {e}"))?;
+    Ok(ok_json(&JniSendResult {
+        success: true,
+        detail: "file sent over webrtc".into(),
+    }))
+}
+
+#[cfg(feature = "webrtc")]
+fn webrtc_receive_file_impl(
+    identity_json: String,
+    trust_store_path: String,
+    signaling_url: String,
+    ice_config_json: String,
+    receive_dir: String,
+    on_file: FileReceivedCallback,
+) -> Result<String, String> {
+    let jni: JniIdentity = serde_json::from_str(&identity_json).map_err(|e| format!("{e}"))?;
+    let local = to_local_identity(&jni)?;
+    let trust =
+        Arc::new(TrustStore::load_from_path(&trust_store_path).map_err(|e| format!("{e}"))?);
+    let ice = parse_ice_config(&ice_config_json)?;
+    crate::net::webrtc_session::receive_file_over_webrtc(
+        &signaling_url,
+        local,
+        trust,
+        &receive_dir,
+        ice,
+        Some(on_file),
+    )
+    .map_err(|e| format!("webrtc receive failed: {e}"))?;
+    Ok(ok_json(&JniSendResult {
+        success: true,
+        detail: "file received over webrtc".into(),
+    }))
+}
+
+#[cfg(feature = "webrtc")]
+#[derive(Deserialize, Default)]
+struct JniIceConfig {
+    #[serde(default)]
+    ice_urls: Vec<String>,
+    #[serde(default)]
+    turn_username: Option<String>,
+    #[serde(default)]
+    turn_credential: Option<String>,
+    #[serde(default)]
+    relay_only: bool,
+}
+
+#[cfg(feature = "webrtc")]
+fn parse_ice_config(json: &str) -> Result<crate::net::webrtc_transport::IceConfig, String> {
+    use crate::net::webrtc_transport::{IceConfig, IceServer};
+    let cfg: JniIceConfig = if json.trim().is_empty() {
+        JniIceConfig::default()
+    } else {
+        serde_json::from_str(json).map_err(|e| format!("bad ice config json: {e}"))?
+    };
+    let username = cfg.turn_username.unwrap_or_default();
+    let credential = cfg.turn_credential.unwrap_or_default();
+    let servers = cfg
+        .ice_urls
+        .into_iter()
+        .filter(|url| !url.trim().is_empty())
+        .map(|url| {
+            if url.starts_with("turn:") || url.starts_with("turns:") {
+                IceServer::turn(url, username.clone(), credential.clone())
+            } else {
+                IceServer::stun(url)
+            }
+        })
+        .collect();
+    Ok(IceConfig {
+        servers,
+        force_relay: cfg.relay_only,
+    })
+}
+
 // ── Listener ───────────────────────────────────────────────────────
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
