@@ -1,11 +1,11 @@
-# LinkHub iOS 端设计（T9 脚手架 · 2026-06-19）
+# LinkHub iOS 端设计（T9 脚手架 + C4 FFI · 2026-06-20）
 
 > 本文是 iOS 端的落地方案 + 现状盘点。**iOS 的编译/打包只能在 macOS + Xcode 上完成**（iOS SDK、`lipo`、`xcodebuild` 仅 macOS 有），本仓库当前在 Windows 上开发，故本轮交付的是**可在 Mac 上一键起步的脚手架 + 方案**，真机构建与权限实测留待有 Mac 时进行。
 
 ## 1. 现状盘点
 
 - 已有：`ios/LinkHub/LinkHub/` 下 6 个 SwiftUI 文件（`ContentView` 选项卡、`PairView`/`DevicesView`/`SendView`、`BonjourService`、`Bridge/RustBridge.swift`）。
-- 已有：core 的 iOS FFI 模块 [ios_bridge.rs](../../core-rs/src/ios_bridge.rs)（`#[cfg(target_os = "ios")] pub mod ios_bridge;`，已在 lib.rs 挂载），导出 `linkhub_generate_identity` / `linkhub_restore_identity` / `linkhub_generate_pairing_payload` / `linkhub_parse_pairing_payload` / `linkhub_confirm_pairing` / `linkhub_free_string`，与 `RustBridge.swift` 一一对应。
+- 已有：core 的 iOS FFI 模块 [ios_bridge.rs](../../core-rs/src/ios_bridge.rs)（`#[cfg(target_os = "ios")] pub mod ios_bridge;`，已在 lib.rs 挂载）。T9 覆盖 identity/pairing/free；**C4 已补齐局域网 send/listen**：`linkhub_send_text` / `linkhub_send_file` / `linkhub_start_listener` / `linkhub_stop_listener` / `linkhub_listener_status`，与 `RustBridge.swift` 一一对应。
 - **缺口（本轮 T9 补上）**：① 无 Xcode 工程（`.xcodeproj` 缺失）→ 加 `ios/project.yml`（XcodeGen 文本化定义）；② Swift 看不到 C 符号 → 加 `ios/include/linkhub_core.h` + `module.modulemap`（`import LinkHubCoreFFI`）；③ 无交叉编译产物 → 加 `ios/scripts/build-core-ios.sh`（三 target → `LinkHubCore.xcframework`）+ core `crate-type` 增 `staticlib`；④ 无权限声明 → 加 `ios/LinkHub/Info.plist`（本地网络/Bonjour 键）；⑤ 源树不自洽（`ContentView` 引用了不存在的 `ServiceView`、无 `@main`）→ 补 `LinkHubApp.swift` + `ServiceView.swift`。
 
 ## 2. FFI 选型：手写 C ABI + JSON 契约（已定）
@@ -16,6 +16,8 @@
 | UniFFI | Swift 绑定自动生成、类型更丰富。代价：引入 `uniffi` 依赖 + `uniffi-bindgen` 构建步骤；core 需按 UniFFI 风格重塑 API；与 Android 的手写 JNI 形成两套范式。**否决**（为单端引入重机制，不划算）。 |
 
 约定（与 Android 一致）：每个调用收/发 UTF-8 JSON C 串；返回串由库 `malloc`，调用方**必须** `linkhub_free_string` 释放；错误回 `{"error":"..."}`（`confirm` 回 `{"success":false,"error":"..."}`）。
+
+C4 新增的局域网传输 FFI 继续复用该契约：`sendText`/`sendFile` 入参为 identity JSON、peer address、peer device id、peer DH key；listener 入参为 identity JSON、bind address、trust store path、receive dir。iOS 没有 Android JVM 回调，接收侧先通过 `listenerStatus` 轮询 `running/detail/error`，收到文件后的 UI 通知/历史写入留给 Swift 层后续接线。
 
 ## 3. 交叉编译与工程化
 
@@ -38,8 +40,8 @@
 
 1. **（本轮）脚手架**：FFI 模块挂载 + 头/modulemap + 构建脚本 + XcodeGen 工程 + Info.plist + App 入口/ServiceView 补齐。
 2. 在 Mac 上 `xcodegen generate` + `build-core-ios.sh` 出 xcframework + Xcode 真机/模拟器跑通最小链路（生成身份、配对、局域网发现）。
-3. 补 listener 接收循环 + 文件/文本传输经 core FFI（当前 `RustBridge` 只覆盖 identity/pairing，未含 send/listen——对照 Android JNI 的 `sendText`/`sendFile`/`startListener` 扩 FFI）。
-4. 真机本地网络权限实测、后台行为实测。
+3. **C4 已完成**：补 listener 接收循环 + 文件/文本传输经 core FFI（对照 Android JNI 的 `sendText`/`sendFile`/`startListener`/`stopListener`/`listenerStatus`）。
+4. Swift UI 接线调用 C4 wrapper；真机本地网络权限实测、后台行为实测。
 5. iOS 跨网络（webrtc-rs 交叉编译）+ CI（需 macOS runner）。
 
 ## 7. 验收口径

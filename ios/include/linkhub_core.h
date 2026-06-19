@@ -36,6 +36,19 @@ char *linkhub_parse_pairing_payload(const char *identity_json,
 char *linkhub_confirm_pairing(const char *identity_json, const char *payload,
                               const char *confirmation_code);
 
+/* Local-network send/listen */
+char *linkhub_send_text(const char *identity_json, const char *peer_addr,
+                        const char *peer_device_id, const char *peer_dh_hex,
+                        const char *text);
+char *linkhub_send_file(const char *identity_json, const char *peer_addr,
+                        const char *peer_device_id, const char *peer_dh_hex,
+                        const char *file_path);
+char *linkhub_start_listener(const char *identity_json, const char *bind_addr,
+                             const char *trust_store_path,
+                             const char *receive_dir);
+char *linkhub_stop_listener(void);
+char *linkhub_listener_status(void);
+
 /* Lifecycle — release any string returned by the functions above. */
 void linkhub_free_string(char *ptr);
 

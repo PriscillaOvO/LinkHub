@@ -53,4 +53,52 @@ enum RustBridge {
         defer { linkhub_free_string(ptr) }
         return String(cString: ptr)
     }
+
+    // ── Local-network send/listen ──
+
+    static func sendText(identityJson: String, peerAddr: String,
+                         peerDeviceId: String, peerDhHex: String,
+                         text: String) -> String? {
+        guard let ptr = linkhub_send_text(
+            identityJson.cString(using: .utf8), peerAddr.cString(using: .utf8),
+            peerDeviceId.cString(using: .utf8), peerDhHex.cString(using: .utf8),
+            text.cString(using: .utf8)
+        ) else { return nil }
+        defer { linkhub_free_string(ptr) }
+        return String(cString: ptr)
+    }
+
+    static func sendFile(identityJson: String, peerAddr: String,
+                         peerDeviceId: String, peerDhHex: String,
+                         filePath: String) -> String? {
+        guard let ptr = linkhub_send_file(
+            identityJson.cString(using: .utf8), peerAddr.cString(using: .utf8),
+            peerDeviceId.cString(using: .utf8), peerDhHex.cString(using: .utf8),
+            filePath.cString(using: .utf8)
+        ) else { return nil }
+        defer { linkhub_free_string(ptr) }
+        return String(cString: ptr)
+    }
+
+    static func startListener(identityJson: String, bindAddr: String,
+                              trustStorePath: String, receiveDir: String) -> String? {
+        guard let ptr = linkhub_start_listener(
+            identityJson.cString(using: .utf8), bindAddr.cString(using: .utf8),
+            trustStorePath.cString(using: .utf8), receiveDir.cString(using: .utf8)
+        ) else { return nil }
+        defer { linkhub_free_string(ptr) }
+        return String(cString: ptr)
+    }
+
+    static func stopListener() -> String? {
+        guard let ptr = linkhub_stop_listener() else { return nil }
+        defer { linkhub_free_string(ptr) }
+        return String(cString: ptr)
+    }
+
+    static func listenerStatus() -> String? {
+        guard let ptr = linkhub_listener_status() else { return nil }
+        defer { linkhub_free_string(ptr) }
+        return String(cString: ptr)
+    }
 }

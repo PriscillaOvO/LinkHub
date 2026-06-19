@@ -40,18 +40,19 @@ The app links `LinkHubCore.xcframework` statically and calls the `linkhub_*`
 C functions through the `LinkHubCoreFFI` Clang module. The JSON contract across
 the FFI is identical to the Android JNI bridge.
 
-## Status (T9 scaffold)
+## Status (T9 scaffold + C4 local send/listen FFI)
 
-Done this round: FFI module wired (`core-rs/src/ios_bridge.rs`, iOS-gated), C
-header + module map, cross-compile script, `staticlib` crate-type, XcodeGen
-project, Info.plist permission keys, `@main` entry + `ServiceView` (the source
-tree previously had neither).
+Done: FFI module wired (`core-rs/src/ios_bridge.rs`, iOS-gated), C header +
+module map, cross-compile script, `staticlib` crate-type, XcodeGen project,
+Info.plist permission keys, `@main` entry + `ServiceView` (the source tree
+previously had neither). C4 added local-network `sendText`/`sendFile` and
+`startListener`/`stopListener`/`listenerStatus` to the C ABI, header, and Swift
+`RustBridge` wrapper.
 
 Not done (needs a Mac): generate/build the project, on-device local-network
-permission test, background-transfer behaviour. The Swift `RustBridge` currently
-covers identity + pairing only — send/listen FFI (mirroring the Android JNI
-`sendText`/`sendFile`/`startListener`) is still to be added. iOS cross-network
-(webrtc-rs) is deferred (C++ deps, unverified on iOS), opt-in like Android.
+permission test, background-transfer behaviour, and wiring the new send/listen
+wrappers into the SwiftUI screens. iOS cross-network (webrtc-rs) is deferred
+(C++ deps, unverified on iOS), opt-in like Android.
 
 ### Rust-for-iOS type-check
 
