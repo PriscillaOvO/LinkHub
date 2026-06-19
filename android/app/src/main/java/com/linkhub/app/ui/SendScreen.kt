@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -28,6 +29,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -61,7 +63,13 @@ fun SendScreen() {
     var sending by remember { mutableStateOf(false) }
     var loaded by remember { mutableStateOf(false) }
     var lastAutoAddr by remember { mutableStateOf("") }
+    var webRtcConfig by remember { mutableStateOf(loadWebRtcConfig(ctx)) }
     val gson = remember { Gson() }
+
+    fun updateWebRtcConfig(next: AndroidWebRtcConfig) {
+        webRtcConfig = next
+        saveWebRtcConfig(ctx, next)
+    }
 
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -79,6 +87,7 @@ fun SendScreen() {
         try {
             identity = loadIdentity(ctx)
             peers = loadTrustedPeers(ctx)
+            webRtcConfig = loadWebRtcConfig(ctx)
         } catch (_: Exception) {
         }
         loaded = true
@@ -253,6 +262,61 @@ fun SendScreen() {
             }
 
             Divider()
+
+            Text("跨网络传输 (WebRTC)", style = MaterialTheme.typography.titleSmall)
+            OutlinedTextField(
+                value = webRtcConfig.signalingUrl,
+                onValueChange = { updateWebRtcConfig(webRtcConfig.copy(signalingUrl = it)) },
+                label = { Text("信令服务器 WebSocket URL") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = webRtcConfig.iceUrlsText,
+                onValueChange = { updateWebRtcConfig(webRtcConfig.copy(iceUrlsText = it)) },
+                label = { Text("STUN/TURN URL") },
+                modifier = Modifier.fillMaxWidth(),
+                maxLines = 3
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedTextField(
+                    value = webRtcConfig.turnUsername,
+                    onValueChange = { updateWebRtcConfig(webRtcConfig.copy(turnUsername = it)) },
+                    label = { Text("TURN 用户名") },
+                    modifier = Modifier.weight(1f)
+                )
+                OutlinedTextField(
+                    value = webRtcConfig.turnCredential,
+                    onValueChange = { updateWebRtcConfig(webRtcConfig.copy(turnCredential = it)) },
+                    label = { Text("TURN 凭证") },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = webRtcConfig.relayOnly,
+                    onCheckedChange = { updateWebRtcConfig(webRtcConfig.copy(relayOnly = it)) }
+                )
+                Text("仅使用 TURN 中继")
+            }
+            Button(
+                onClick = {
+                    if (selectedPeer == null || filePath.isEmpty()) return@Button
+                    val currentIdentity = identity ?: return@Button
+                    val currentPeer = selectedPeer ?: return@Button
+                    val currentPath = filePath.trim()
+                    val currentConfig = webRtcConfig
+                    saveWebRtcConfig(ctx, currentConfig)
+                    sending = true
+                    statusMsg = "跨网络文件发送中..."
+                    scope.launch {
+                        statusMsg = sendWebRtcFileOnIo(ctx, gson, currentIdentity, currentPeer, currentPath, currentConfig)
+                        sending = false
+                    }
+                },
+                enabled = selectedPeer != null && filePath.isNotEmpty() && !sending
+            ) {
+                Text(if (sending) "跨网络发送中..." else "跨网络发送文件")
+            }
         }
 
         if (statusMsg.isNotEmpty()) {
@@ -343,6 +407,67 @@ private suspend fun sendFileOnIo(
         val status = "发送失败: ${e.message}"
         recordSendHistory(ctx, peer, "file", filePath, false, status)
         showTransferNotification(ctx, peer, "file", "文件发送失败", "${peer.deviceName}: $status")
+        status
+    }
+}
+
+private suspend fun sendWebRtcFileOnIo(
+    ctx: Context,
+    gson: Gson,
+    identity: IdentityJson,
+    peer: TrustedPeer,
+    filePath: String,
+    config: AndroidWebRtcConfig
+): String = withContext(Dispatchers.IO) {
+    try {
+        val file = File(filePath)
+        if (!file.exists() || !file.isFile) {
+            val status = "跨网络发送失败: 文件不存在或不可读取"
+            recordSendHistory(ctx, peer, "webrtc-file", filePath, false, status)
+            showTransferNotification(ctx, peer, "webrtc-file", "跨网络文件发送失败", "${peer.deviceName}: $status")
+            return@withContext status
+        }
+        val signalingUrl = config.signalingUrl.trim()
+        if (signalingUrl.isBlank()) {
+            val status = "跨网络发送失败: 信令服务器 URL 为空"
+            recordSendHistory(ctx, peer, "webrtc-file", file.name, false, status)
+            showTransferNotification(ctx, peer, "webrtc-file", "跨网络文件发送失败", "${peer.deviceName}: $status")
+            return@withContext status
+        }
+
+        val trustStorePath = ensureRustTrustStore(ctx)
+        val iceConfigJson = webRtcIceConfigJson(gson, config)
+        showTransferNotification(
+            ctx,
+            peer,
+            "webrtc-file",
+            "正在跨网络发送文件",
+            "${peer.deviceName}: ${file.name}",
+            inProgress = true
+        )
+        val result = RustBridge.webrtcSendFile(
+            gson.toJson(identity),
+            trustStorePath,
+            peer.deviceId,
+            signalingUrl,
+            iceConfigJson,
+            file.absolutePath
+        )
+        val parsed = parseSendResult(gson, result)
+        val status = friendlyWebRtcStatus(resultStatus(parsed, result, "跨网络文件已发送"))
+        recordSendHistory(ctx, peer, "webrtc-file", file.name, parsed?.success == true, status)
+        showTransferNotification(
+            ctx,
+            peer,
+            "webrtc-file",
+            if (parsed?.success == true) "跨网络文件已发送" else "跨网络文件发送失败",
+            "${peer.deviceName}: ${file.name} - $status"
+        )
+        status
+    } catch (e: Exception) {
+        val status = friendlyWebRtcStatus("跨网络发送失败: ${e.message}")
+        recordSendHistory(ctx, peer, "webrtc-file", filePath, false, status)
+        showTransferNotification(ctx, peer, "webrtc-file", "跨网络文件发送失败", "${peer.deviceName}: $status")
         status
     }
 }

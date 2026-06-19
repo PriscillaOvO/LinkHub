@@ -7,8 +7,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Divider
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -20,10 +23,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.google.gson.Gson
 import com.linkhub.app.service.LinkHubService
 import kotlinx.coroutines.delay
 
@@ -44,22 +49,37 @@ fun ServiceScreen() {
     var listenAddr by remember { mutableStateOf("0.0.0.0:8787") }
     var receiveDir by remember { mutableStateOf(defaultReceiveDir(ctx)) }
     var statusMsg by remember { mutableStateOf(serviceStatus.error.ifBlank { serviceStatus.detail }) }
+    var webRtcEnabled by remember { mutableStateOf(false) }
+    var webRtcConfig by remember { mutableStateOf(loadWebRtcConfig(ctx)) }
+    var webRtcRunning by remember { mutableStateOf(LinkHubService.isWebRtcReceiving) }
+    var webRtcDetail by remember { mutableStateOf(LinkHubService.webRtcDetail) }
+    var webRtcError by remember { mutableStateOf(LinkHubService.webRtcError) }
+    val gson = remember { Gson() }
     val listenPort = listenAddr.substringAfterLast(':', "8787").toIntOrNull() ?: 8787
     val networkHints = remember(listenPort) { localAndroidNetworkHints(listenPort) }
 
+    fun updateWebRtcConfig(next: AndroidWebRtcConfig) {
+        webRtcConfig = next
+        saveWebRtcConfig(ctx, next)
+    }
+
     LaunchedEffect(Unit) {
+        webRtcConfig = loadWebRtcConfig(ctx)
         while (true) {
             isRunning = LinkHubService.isRunning
             serviceStatus = reconcileServiceStatus(ctx, isRunning)
             if (serviceStatus.listenAddr.isNotBlank()) listenAddr = serviceStatus.listenAddr
             if (serviceStatus.receiveDir.isNotBlank()) receiveDir = serviceStatus.receiveDir
             statusMsg = serviceStatus.error.ifBlank { serviceStatus.detail }
+            webRtcRunning = LinkHubService.isWebRtcReceiving
+            webRtcDetail = LinkHubService.webRtcDetail
+            webRtcError = LinkHubService.webRtcError
             delay(1_000)
         }
     }
 
     Column(
-        modifier = Modifier.fillMaxSize().padding(16.dp),
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text("监听服务", style = MaterialTheme.typography.titleMedium)
@@ -85,6 +105,56 @@ fun ServiceScreen() {
             Text("使用应用专属接收目录")
         }
 
+        Divider()
+        Text("跨网络接收 (WebRTC)", style = MaterialTheme.typography.titleSmall)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = webRtcEnabled,
+                onCheckedChange = { webRtcEnabled = it },
+                enabled = !isRunning
+            )
+            Text("随前台服务启动")
+        }
+        OutlinedTextField(
+            value = webRtcConfig.signalingUrl,
+            onValueChange = { updateWebRtcConfig(webRtcConfig.copy(signalingUrl = it)) },
+            label = { Text("信令服务器 WebSocket URL") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !isRunning
+        )
+        OutlinedTextField(
+            value = webRtcConfig.iceUrlsText,
+            onValueChange = { updateWebRtcConfig(webRtcConfig.copy(iceUrlsText = it)) },
+            label = { Text("STUN/TURN URL") },
+            modifier = Modifier.fillMaxWidth(),
+            enabled = !isRunning,
+            maxLines = 3
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            OutlinedTextField(
+                value = webRtcConfig.turnUsername,
+                onValueChange = { updateWebRtcConfig(webRtcConfig.copy(turnUsername = it)) },
+                label = { Text("TURN 用户名") },
+                modifier = Modifier.weight(1f),
+                enabled = !isRunning
+            )
+            OutlinedTextField(
+                value = webRtcConfig.turnCredential,
+                onValueChange = { updateWebRtcConfig(webRtcConfig.copy(turnCredential = it)) },
+                label = { Text("TURN 凭证") },
+                modifier = Modifier.weight(1f),
+                enabled = !isRunning
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Checkbox(
+                checked = webRtcConfig.relayOnly,
+                onCheckedChange = { updateWebRtcConfig(webRtcConfig.copy(relayOnly = it)) },
+                enabled = !isRunning
+            )
+            Text("仅使用 TURN 中继")
+        }
+
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(
                 onClick = {
@@ -94,9 +164,13 @@ fun ServiceScreen() {
                             return@Button
                         }
                         ensureRustTrustStore(ctx)
+                        saveWebRtcConfig(ctx, webRtcConfig)
                         val intent = Intent(ctx, LinkHubService::class.java).apply {
                             putExtra("listen_addr", listenAddr)
                             putExtra("receive_dir", receiveDir)
+                            putExtra("webrtc_receive_enabled", webRtcEnabled)
+                            putExtra("webrtc_signaling_url", webRtcConfig.signalingUrl.trim())
+                            putExtra("webrtc_ice_config_json", webRtcIceConfigJson(gson, webRtcConfig))
                         }
                         ContextCompat.startForegroundService(ctx, intent)
                         isRunning = true
@@ -136,6 +210,18 @@ fun ServiceScreen() {
         }
         if (serviceStatus.mdnsServiceName.isNotBlank()) {
             Text("mDNS: ${serviceStatus.mdnsServiceName}", style = MaterialTheme.typography.bodySmall)
+        }
+        Text(
+            if (webRtcRunning) "跨网络: 接收中 (${webRtcConfig.signalingUrl})" else "跨网络: 未接收",
+            style = MaterialTheme.typography.bodySmall
+        )
+        val webRtcStatusText = webRtcError.ifBlank { webRtcDetail }
+        if (webRtcStatusText.isNotBlank()) {
+            Text(
+                friendlyWebRtcStatus(webRtcStatusText),
+                color = if (webRtcError.isNotBlank()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.bodySmall
+            )
         }
 
         Divider()

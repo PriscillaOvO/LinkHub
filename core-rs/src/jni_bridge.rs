@@ -14,7 +14,8 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::net::TcpListener;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 use std::time::{Duration, SystemTime};
 
 // ── JSON interchange types ─────────────────────────────────────────
@@ -366,6 +367,24 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_webrtcReceiveFile(
     }
 }
 
+#[no_mangle]
+pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_webrtcStopReceiver(
+    mut env: JNIEnv,
+    _class: JClass,
+) -> jstring {
+    android_webrtc_receiver_stop_flag().store(true, Ordering::Relaxed);
+    make_string(
+        &mut env,
+        r#"{"running":false,"detail":"webrtc receiver stopping"}"#,
+    )
+}
+
+static WEBRTC_RECEIVER_STOP: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+fn android_webrtc_receiver_stop_flag() -> Arc<AtomicBool> {
+    Arc::clone(WEBRTC_RECEIVER_STOP.get_or_init(|| Arc::new(AtomicBool::new(false))))
+}
+
 #[cfg(not(feature = "webrtc"))]
 fn webrtc_send_file_impl(
     _identity_json: String,
@@ -435,13 +454,16 @@ fn webrtc_receive_file_impl(
     let trust =
         Arc::new(TrustStore::load_from_path(&trust_store_path).map_err(|e| format!("{e}"))?);
     let ice = parse_ice_config(&ice_config_json)?;
-    crate::net::webrtc_session::receive_file_over_webrtc(
+    let stop = android_webrtc_receiver_stop_flag();
+    stop.store(false, Ordering::Relaxed);
+    crate::net::webrtc_session::receive_file_over_webrtc_until(
         &signaling_url,
         local,
         trust,
         &receive_dir,
         ice,
         Some(on_file),
+        stop,
     )
     .map_err(|e| format!("webrtc receive failed: {e}"))?;
     Ok(ok_json(&JniSendResult {
@@ -493,8 +515,6 @@ fn parse_ice_config(json: &str) -> Result<crate::net::webrtc_transport::IceConfi
 
 // ── Listener ───────────────────────────────────────────────────────
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, Once};
 use std::thread::JoinHandle;
 static LISTENER_RUNNING: AtomicBool = AtomicBool::new(false);
 static LISTENER_LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);

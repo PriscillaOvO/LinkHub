@@ -13,7 +13,9 @@ import com.linkhub.app.MainActivity
 import com.linkhub.app.bridge.RustBridge
 import com.linkhub.app.ui.defaultReceiveDir
 import com.linkhub.app.ui.ensureRustTrustStore
+import com.linkhub.app.ui.friendlyWebRtcStatus
 import com.linkhub.app.ui.handleReceivedFile
+import com.linkhub.app.ui.isWebRtcFeatureUnavailable
 import com.linkhub.app.ui.loadServiceStatus
 import com.linkhub.app.ui.loadIdentity
 import com.linkhub.app.ui.loadIdentityJson
@@ -30,6 +32,18 @@ class LinkHubService : Service() {
         @Volatile
         var isRunning = false
             private set
+
+        @Volatile
+        var isWebRtcReceiving = false
+            private set
+
+        @Volatile
+        var webRtcDetail = ""
+            private set
+
+        @Volatile
+        var webRtcError = ""
+            private set
     }
 
     private val NOTIFICATION_ID = 1001
@@ -37,8 +51,12 @@ class LinkHubService : Service() {
     @Volatile
     private var monitorActive = false
     private var monitorThread: Thread? = null
+    @Volatile
+    private var webRtcActive = false
+    private var webRtcThread: Thread? = null
 
     data class ListenerResult(
+        val success: Boolean = false,
         val running: Boolean = false,
         val detail: String = "",
         val error: String = ""
@@ -49,8 +67,14 @@ class LinkHubService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val addr = intent?.getStringExtra("listen_addr") ?: "0.0.0.0:8787"
         val receiveDir = intent?.getStringExtra("receive_dir") ?: defaultReceiveDir(this)
+        val webRtcEnabled = intent?.getBooleanExtra("webrtc_receive_enabled", false) ?: false
+        val webRtcSignalingUrl = intent?.getStringExtra("webrtc_signaling_url") ?: ""
+        val webRtcIceConfigJson = intent?.getStringExtra("webrtc_ice_config_json") ?: ""
 
-        startForeground(NOTIFICATION_ID, buildNotification("LinkHub listener: $addr"))
+        startForeground(
+            NOTIFICATION_ID,
+            buildNotification(if (webRtcEnabled) "LinkHub listener + WebRTC" else "LinkHub listener: $addr")
+        )
 
         val appContext = applicationContext
         RustBridge.onFileReceivedListener = { peerDeviceId, peerDeviceName, fileName, filePath, sizeBytes ->
@@ -98,6 +122,15 @@ class LinkHubService : Service() {
                     val port = addr.substringAfterLast(':', "8787").toIntOrNull() ?: 8787
                     mdnsName = startAndroidMdnsAdvertise(this, identity, port)
                     startListenerMonitor(addr, receiveDir, mdnsName)
+                    if (webRtcEnabled) {
+                        startWebRtcReceiverLoop(
+                            identityJson = identityJson,
+                            trustStorePath = trustStorePath,
+                            signalingUrl = webRtcSignalingUrl,
+                            iceConfigJson = webRtcIceConfigJson,
+                            receiveDir = receiveDir
+                        )
+                    }
                 }
                 saveServiceStatus(
                     this,
@@ -126,6 +159,7 @@ class LinkHubService : Service() {
 
     override fun onDestroy() {
         monitorActive = false
+        stopWebRtcReceiverLoop()
         RustBridge.onFileReceivedListener = null
         try {
             RustBridge.stopListener()
@@ -139,6 +173,100 @@ class LinkHubService : Service() {
         }
         isRunning = false
         super.onDestroy()
+    }
+
+    private fun startWebRtcReceiverLoop(
+        identityJson: String,
+        trustStorePath: String,
+        signalingUrl: String,
+        iceConfigJson: String,
+        receiveDir: String
+    ) {
+        stopWebRtcReceiverLoop()
+        val url = signalingUrl.trim()
+        if (url.isBlank()) {
+            webRtcDetail = ""
+            webRtcError = "跨网络接收失败: 信令服务器 URL 为空"
+            return
+        }
+
+        webRtcActive = true
+        isWebRtcReceiving = true
+        webRtcDetail = "WebRTC receiver starting"
+        webRtcError = ""
+        webRtcThread = Thread {
+            while (webRtcActive) {
+                try {
+                    webRtcDetail = "waiting for WebRTC offer"
+                    webRtcError = ""
+                    val resultJson = RustBridge.webrtcReceiveFile(
+                        identityJson,
+                        trustStorePath,
+                        url,
+                        iceConfigJson,
+                        receiveDir
+                    )
+                    val result = parseNativeResult(resultJson)
+                    if (result.error.isNotBlank()) {
+                        webRtcError = friendlyWebRtcStatus(result.error)
+                        webRtcDetail = "WebRTC receiver stopped"
+                        if (isWebRtcFeatureUnavailable(result.error)) {
+                            webRtcActive = false
+                        } else if (webRtcActive) {
+                            Thread.sleep(2_000)
+                        }
+                    } else {
+                        webRtcError = ""
+                        webRtcDetail = result.detail.ifBlank { "WebRTC file received; waiting again" }
+                    }
+                } catch (_: InterruptedException) {
+                    webRtcActive = false
+                } catch (e: Throwable) {
+                    val reason = e.message ?: e::class.java.simpleName
+                    webRtcError = friendlyWebRtcStatus(reason)
+                    if (isWebRtcFeatureUnavailable(reason)) {
+                        webRtcActive = false
+                    }
+                    if (webRtcActive) {
+                        try {
+                            Thread.sleep(2_000)
+                        } catch (_: InterruptedException) {
+                            webRtcActive = false
+                        }
+                    }
+                }
+            }
+            isWebRtcReceiving = false
+            if (webRtcError.isBlank()) {
+                webRtcDetail = "WebRTC receiver stopped"
+            }
+        }.apply {
+            name = "LinkHubWebRtcReceiver"
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun stopWebRtcReceiverLoop() {
+        webRtcActive = false
+        try {
+            RustBridge.webrtcStopReceiver()
+        } catch (_: Throwable) {
+        }
+        webRtcThread?.interrupt()
+        webRtcThread = null
+        isWebRtcReceiving = false
+        if (webRtcError.isBlank()) {
+            webRtcDetail = "WebRTC receiver stopped"
+        }
+    }
+
+    private fun parseNativeResult(json: String): ListenerResult {
+        return try {
+            gson.fromJson(json, ListenerResult::class.java)
+        } catch (_: Exception) {
+            ListenerResult(error = json)
+        }
     }
 
     private fun startListenerMonitor(listenAddr: String, receiveDir: String, mdnsServiceName: String) {
