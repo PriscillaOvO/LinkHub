@@ -77,6 +77,19 @@ async fn connect_and_login(url: &str, sk: &SigningKey, device_id: &str) -> Ws {
     ws
 }
 
+async fn connect_should_be_rejected(url: &str) {
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(url),
+    )
+    .await
+    .expect("over-limit connect returned");
+    assert!(
+        result.is_err(),
+        "over-limit connection unexpectedly completed websocket handshake"
+    );
+}
+
 #[tokio::test]
 async fn relays_signaling_between_two_authenticated_clients() {
     let url = start_server().await;
@@ -219,6 +232,34 @@ async fn message_flood_is_rate_limited_and_dropped() {
         }
     }
     assert!(saw_rate_limit, "expected a rate-limit error before close");
+}
+
+#[tokio::test]
+async fn same_ip_connection_limit_rejects_extra_handshake() {
+    let limits = Limits {
+        max_connections: 10,
+        max_connections_per_ip: 1,
+        ..Limits::default()
+    };
+    let url = start_server_with_limits(limits).await;
+    let sk = key_from_seed(10);
+    let _held = connect_and_login(&url, &sk, "lh-held").await;
+
+    connect_should_be_rejected(&url).await;
+}
+
+#[tokio::test]
+async fn global_connection_limit_rejects_extra_handshake() {
+    let limits = Limits {
+        max_connections: 1,
+        max_connections_per_ip: 10,
+        ..Limits::default()
+    };
+    let url = start_server_with_limits(limits).await;
+    let sk = key_from_seed(11);
+    let _held = connect_and_login(&url, &sk, "lh-held").await;
+
+    connect_should_be_rejected(&url).await;
 }
 
 #[tokio::test]

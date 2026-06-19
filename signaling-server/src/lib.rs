@@ -27,7 +27,7 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message;
 
-use limits::{Limits, RateLimiter};
+use limits::{ConnectionPermit, ConnectionRegistry, Limits, RateLimiter};
 use protocol::{ClientMsg, ServerMsg};
 
 /// Presence table: identity public key (hex) -> channel into that device's
@@ -44,11 +44,19 @@ pub async fn serve(listener: TcpListener) -> std::io::Result<()> {
 /// caps tight enough to trip deterministically).
 pub async fn serve_with_limits(listener: TcpListener, limits: Limits) -> std::io::Result<()> {
     let registry: Registry = Arc::new(Mutex::new(HashMap::new()));
+    let connection_registry = ConnectionRegistry::default();
     loop {
-        let (stream, _peer) = listener.accept().await?;
+        let (stream, peer_addr) = listener.accept().await?;
+        let connection_permit = match connection_registry.register(peer_addr, &limits) {
+            Ok(permit) => permit,
+            Err(err) => {
+                eprintln!("connection rejected: {err}");
+                continue;
+            }
+        };
         let registry = Arc::clone(&registry);
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, registry, limits).await {
+            if let Err(err) = handle_connection(stream, registry, limits, connection_permit).await {
                 // Per-connection errors are expected (clients drop, send junk);
                 // log and move on, never take down the server.
                 eprintln!("connection ended: {err}");
@@ -61,6 +69,7 @@ async fn handle_connection(
     stream: TcpStream,
     registry: Registry,
     limits: Limits,
+    _connection_permit: ConnectionPermit,
 ) -> Result<(), String> {
     // Cap inbound frame/message size at the protocol layer so a single peer can't
     // exhaust memory with a giant frame (design §7 抗滥用).
