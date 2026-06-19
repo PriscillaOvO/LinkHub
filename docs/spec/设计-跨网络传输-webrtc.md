@@ -116,6 +116,7 @@ SDP offer/answer、ICE candidate 都塞进 `Signaling{session_id, kind, payload_
 - **版本协商（逐传输）**：接收端在 `FILE_START` 的 ACK 状态尾加 `+bin` 能力标记；发送端解析到 `+bin` 才发 `FileChunkBin`，否则回落 hex `FileChunk`。`parse_file_start_ack_status` 容忍 `+bin` 后缀。**明文 TCP 路径**（按行分隔，承不了裸字节）保持 hex → 完全向后兼容。
 - **背压不变**：仍是逐块停等 ACK（发一块等 `FILE_CHUNK_RECEIVED` 再发下一块）。`u16` 64KB 帧上限对 4KB 块绰绰有余。
 - **验收**：6 新单测 + `webrtc_cli_e2e`/`webrtc_e2e`(DataChannel)/`webrtc_turn_e2e`(强制 TURN) 三个文件 e2e 现自动走二进制路径且 SHA 一致 → 在真实 WebRTC/TURN 上验证。
+- **C6 滑动窗口暂缓（2026-06-20）**：多块在途会改变背压、ACK、断点续传与旧端回退语义，不能作为 T8 的小补丁直接落。后续应先设计窗口能力协商（例如 `+winN`）、窗口内存上限、乱序/重传策略和恢复点推进规则，再补状态机单测与三条 WebRTC 文件 e2e。
 
 ---
 
