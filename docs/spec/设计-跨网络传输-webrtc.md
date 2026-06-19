@@ -108,6 +108,15 @@ SDP offer/answer、ICE candidate 都塞进 `Signaling{session_id, kind, payload_
 - webrtc-rs 及 tokio 全部锁在 **`webrtc` feature（默认关）**：默认 `cargo build` / `cargo ndk check --lib` / 现有测试矩阵**完全不受影响、不变重**；M3 的实现与测试用 `--features webrtc` 编译验证（spike 已证明 webrtc-rs 能在 Windows + Android NDK 双 ABI 交叉编译）。
 - DataChannel 单帧大小有限（典型 ~16KB/64KB），而认证会话的加密帧 = 2 字节大端长度前缀 + ≤64KB 密文。`DataChannelDuplex` 在 `Read` 侧做**重组**（把多个 DataChannel 消息拼回连续字节流再交给 `BufRead`），在 `Write` 侧按 DataChannel 上限**分片** `dc.send()`，使「字节流语义」在消息信道上成立。
 
+### 4.6 文件分块二进制分帧（T8，2026-06-19 完成）
+
+加密会话的每个 Noise 帧本就是 `2 字节大端长度前缀 + ≤64KB 密文`（自带分帧）。原 `FILE_CHUNK` 把原始字节 **hex 编码**（线缆 2×）只是为了塞进「Tab 分隔的文本行」——对分帧毫无必要，纯属浪费。
+
+- **新帧**：`WireMessage::FileChunkBin{transfer_id, chunk_index, data: Vec<u8>}`，明文 = ASCII 头 `FILE_CHUNK_BIN\t{id}\t{index}\t` + **裸字节**。`serialize_message_bytes`/`parse_binary_frame`（`protocol.rs`）走字节路径：解析时只切前两个 Tab（结构性），其余原样作 data（块内 Tab/换行/NUL/0xFF 保真）；非二进制帧回退 UTF-8 文本 `parse_message`。`recv_encrypted_frame` 不再假设 UTF-8。
+- **版本协商（逐传输）**：接收端在 `FILE_START` 的 ACK 状态尾加 `+bin` 能力标记；发送端解析到 `+bin` 才发 `FileChunkBin`，否则回落 hex `FileChunk`。`parse_file_start_ack_status` 容忍 `+bin` 后缀。**明文 TCP 路径**（按行分隔，承不了裸字节）保持 hex → 完全向后兼容。
+- **背压不变**：仍是逐块停等 ACK（发一块等 `FILE_CHUNK_RECEIVED` 再发下一块）。`u16` 64KB 帧上限对 4KB 块绰绰有余。
+- **验收**：6 新单测 + `webrtc_cli_e2e`/`webrtc_e2e`(DataChannel)/`webrtc_turn_e2e`(强制 TURN) 三个文件 e2e 现自动走二进制路径且 SHA 一致 → 在真实 WebRTC/TURN 上验证。
+
 ---
 
 ## 5. 信令服务器（新组件，尽量薄）

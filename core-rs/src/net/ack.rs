@@ -179,6 +179,10 @@ fn wait_for_ack(
 }
 
 pub(super) fn parse_file_start_ack_status(status: &str) -> Option<u64> {
+    // Tolerate the optional T8 `+bin` capability suffix (see
+    // `file_start_ack_supports_bin`) so resume parsing is unaffected by it.
+    let status = status.strip_suffix("+bin").unwrap_or(status);
+
     if status == "FILE_START_RECEIVED" {
         return Some(0);
     }
@@ -186,6 +190,14 @@ pub(super) fn parse_file_start_ack_status(status: &str) -> Option<u64> {
     status
         .strip_prefix("FILE_START_RECEIVED:")
         .and_then(|value| value.parse().ok())
+}
+
+/// Whether a FILE_START ack status advertises binary-chunk support (T8).
+///
+/// v2 encrypted receivers append a `+bin` suffix to the ack status; v1 receivers
+/// omit it, so the sender falls back to hex-coded [`super::protocol::WireMessage::FileChunk`].
+pub(super) fn file_start_ack_supports_bin(status: &str) -> bool {
+    status.ends_with("+bin")
 }
 
 fn is_retryable_ack_error(err: &io::Error) -> bool {
@@ -207,6 +219,23 @@ mod tests {
             Some(3)
         );
         assert_eq!(parse_file_start_ack_status("TEXT_RECEIVED"), None);
+        // The +bin capability suffix must not disturb resume parsing.
+        assert_eq!(
+            parse_file_start_ack_status("FILE_START_RECEIVED+bin"),
+            Some(0)
+        );
+        assert_eq!(
+            parse_file_start_ack_status("FILE_START_RECEIVED:3+bin"),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn detects_binary_chunk_capability() {
+        assert!(file_start_ack_supports_bin("FILE_START_RECEIVED+bin"));
+        assert!(file_start_ack_supports_bin("FILE_START_RECEIVED:3+bin"));
+        assert!(!file_start_ack_supports_bin("FILE_START_RECEIVED"));
+        assert!(!file_start_ack_supports_bin("FILE_START_RECEIVED:3"));
     }
 
     #[test]

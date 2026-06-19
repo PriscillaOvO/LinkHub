@@ -34,6 +34,17 @@ pub(in crate::net) enum WireMessage {
         chunk_index: u64,
         data_hex: String,
     },
+    /// Binary-framed file chunk (T8). Carries the same payload as
+    /// [`WireMessage::FileChunk`] but the raw bytes ride inside the Noise frame
+    /// uncoded instead of hex-encoded, halving the on-wire size of file data.
+    /// Only used over the length-prefixed encrypted transport, and only once the
+    /// receiver advertises support via the `+bin` FILE_START ack suffix; v1
+    /// peers keep receiving hex-coded [`WireMessage::FileChunk`].
+    FileChunkBin {
+        transfer_id: String,
+        chunk_index: u64,
+        data: Vec<u8>,
+    },
     FileEnd {
         transfer_id: String,
     },
@@ -164,6 +175,14 @@ impl WireMessage {
         }
     }
 
+    pub(in crate::net) fn file_chunk_bin(transfer_id: &str, chunk_index: u64, data: &[u8]) -> Self {
+        WireMessage::FileChunkBin {
+            transfer_id: sanitize_field(transfer_id),
+            chunk_index,
+            data: data.to_vec(),
+        }
+    }
+
     pub(in crate::net) fn file_end(transfer_id: &str) -> Self {
         WireMessage::FileEnd {
             transfer_id: sanitize_field(transfer_id),
@@ -252,6 +271,30 @@ impl WireMessage {
     }
 }
 
+/// ASCII tag that prefixes a binary file-chunk frame plaintext (T8).
+pub(in crate::net) const FILE_CHUNK_BIN_TAG: &str = "FILE_CHUNK_BIN";
+
+/// Serialize a message to the exact bytes carried inside one encrypted frame.
+///
+/// All text messages serialize to their UTF-8 line; [`WireMessage::FileChunkBin`]
+/// serializes to an ASCII header (`FILE_CHUNK_BIN\t{id}\t{index}\t`) followed by
+/// the raw chunk bytes verbatim — no hex — halving the on-wire size of file data.
+pub(in crate::net) fn serialize_message_bytes(message: &WireMessage) -> Vec<u8> {
+    match message {
+        WireMessage::FileChunkBin {
+            transfer_id,
+            chunk_index,
+            data,
+        } => {
+            let mut out =
+                format!("{FILE_CHUNK_BIN_TAG}\t{transfer_id}\t{chunk_index}\t").into_bytes();
+            out.extend_from_slice(data);
+            out
+        }
+        other => serialize_message(other).into_bytes(),
+    }
+}
+
 pub(in crate::net) fn serialize_message(message: &WireMessage) -> String {
     match message {
         WireMessage::Hello { device_id, name } => format!("HELLO\t{device_id}\t{name}"),
@@ -291,6 +334,11 @@ pub(in crate::net) fn serialize_message(message: &WireMessage) -> String {
             chunk_index,
             data_hex,
         } => format!("FILE_CHUNK\t{transfer_id}\t{chunk_index}\t{data_hex}"),
+        // Binary chunks carry raw bytes and must be serialized via
+        // `serialize_message_bytes`; they never reach the text/cleartext path.
+        WireMessage::FileChunkBin { .. } => {
+            unreachable!("FileChunkBin must be serialized with serialize_message_bytes")
+        }
         WireMessage::FileEnd { transfer_id } => format!("FILE_END\t{transfer_id}"),
         WireMessage::Ack { message_id, status } => format!("ACK\t{message_id}\t{status}"),
         WireMessage::Signaling {
@@ -477,6 +525,50 @@ pub(in crate::net) fn parse_message(line: &str) -> Result<WireMessage, String> {
         }
         _ => Err(format!("unsupported wire message: {line}")),
     }
+}
+
+/// Parse the plaintext of one decrypted frame, which may be a binary file chunk.
+///
+/// A frame whose bytes begin with `FILE_CHUNK_BIN\t` is decoded into a
+/// [`WireMessage::FileChunkBin`] whose `data` is the verbatim trailing bytes (so
+/// tabs, newlines and NUL inside the chunk survive); every other frame is treated
+/// as a UTF-8 text line and handed to [`parse_message`]. This is the receive-side
+/// counterpart of [`serialize_message_bytes`].
+pub(in crate::net) fn parse_binary_frame(bytes: &[u8]) -> Result<WireMessage, String> {
+    let tag_prefix = format!("{FILE_CHUNK_BIN_TAG}\t");
+    if let Some(rest) = bytes.strip_prefix(tag_prefix.as_bytes()) {
+        // rest = {transfer_id}\t{chunk_index}\t{raw data…}
+        let first_tab = rest
+            .iter()
+            .position(|&b| b == b'\t')
+            .ok_or("binary file chunk missing chunk index")?;
+        let transfer_id = std::str::from_utf8(&rest[..first_tab])
+            .map_err(|_| "binary file chunk transfer id is not utf-8".to_string())?;
+        if transfer_id.is_empty() {
+            return Err("binary file chunk has empty transfer id".to_string());
+        }
+
+        let after_id = &rest[first_tab + 1..];
+        let second_tab = after_id
+            .iter()
+            .position(|&b| b == b'\t')
+            .ok_or("binary file chunk missing data separator")?;
+        let chunk_index = std::str::from_utf8(&after_id[..second_tab])
+            .map_err(|_| "binary file chunk index is not utf-8".to_string())?
+            .parse::<u64>()
+            .map_err(|_| "invalid binary file chunk index".to_string())?;
+
+        let data = after_id[second_tab + 1..].to_vec();
+        return Ok(WireMessage::FileChunkBin {
+            transfer_id: transfer_id.to_string(),
+            chunk_index,
+            data,
+        });
+    }
+
+    let line = String::from_utf8(bytes.to_vec())
+        .map_err(|err| format!("frame is neither binary chunk nor utf-8 text: {err}"))?;
+    parse_message(&line)
 }
 
 pub(in crate::net) fn sanitize_field(value: &str) -> String {
@@ -779,6 +871,57 @@ mod tests {
         let message = WireMessage::file_end("phone-001-100");
 
         assert_eq!(serialize_message(&message), "FILE_END\tphone-001-100");
+    }
+
+    #[test]
+    fn serializes_and_parses_binary_file_chunk() {
+        let raw = b"\x00\x01\thello\nworld\xff\xfe";
+        let message = WireMessage::file_chunk_bin("phone-001-100", 7, raw);
+        let bytes = serialize_message_bytes(&message);
+
+        assert!(bytes.starts_with(b"FILE_CHUNK_BIN\tphone-001-100\t7\t"));
+        assert_eq!(
+            parse_binary_frame(&bytes).unwrap(),
+            WireMessage::FileChunkBin {
+                transfer_id: "phone-001-100".to_string(),
+                chunk_index: 7,
+                data: raw.to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn binary_file_chunk_preserves_data_with_tabs_and_zero_bytes() {
+        // Only the first two tabs are structural (after transfer_id and index);
+        // tabs/newlines/NUL inside the payload must survive verbatim.
+        let raw = b"a\tb\tc\n\x00\x00end";
+        let bytes = serialize_message_bytes(&WireMessage::file_chunk_bin("t", 0, raw));
+
+        match parse_binary_frame(&bytes).unwrap() {
+            WireMessage::FileChunkBin { data, .. } => assert_eq!(data, raw),
+            other => panic!("expected FileChunkBin, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn binary_frame_parser_falls_back_to_text() {
+        let bytes = serialize_message_bytes(&WireMessage::text("m1", "hi"));
+
+        assert_eq!(
+            parse_binary_frame(&bytes).unwrap(),
+            WireMessage::Text {
+                message_id: "m1".to_string(),
+                content: "hi".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_binary_chunk_is_rejected() {
+        // Missing the second tab (no data separator) and empty transfer id.
+        assert!(parse_binary_frame(b"FILE_CHUNK_BIN\tt\t").is_err());
+        assert!(parse_binary_frame(b"FILE_CHUNK_BIN\t\t0\tdata").is_err());
+        assert!(parse_binary_frame(b"FILE_CHUNK_BIN\tt\tnotanumber\tdata").is_err());
     }
 
     #[test]

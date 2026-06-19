@@ -316,7 +316,7 @@ pub fn run_authenticated_file_sender_over<W: Write, R: BufRead>(
         peer_dh_public_key,
     )?;
 
-    let resume_from_chunk = send_encrypted_file_start_with_retries(
+    let (resume_from_chunk, peer_supports_bin) = send_encrypted_file_start_with_retries(
         &mut transport,
         &mut writer,
         &mut reader,
@@ -341,17 +341,32 @@ pub fn run_authenticated_file_sender_over<W: Write, R: BufRead>(
             continue;
         }
 
-        let data_hex = encode_hex(&buffer[..bytes_read]);
         let chunk_ack_id = file_chunk_ack_id(&transfer_id, chunk_index);
-        send_encrypted_with_ack_retries(
-            &mut transport,
-            &mut writer,
-            &mut reader,
-            &chunk_ack_id,
-            "FILE_CHUNK_RECEIVED",
-            || WireMessage::file_chunk(&transfer_id, chunk_index, &data_hex),
-            "FILE_CHUNK",
-        )?;
+        if peer_supports_bin {
+            // T8: raw bytes ride inside the Noise frame — no hex doubling. The
+            // per-chunk ACK below is the flow-control backpressure (stop-and-wait).
+            let data = buffer[..bytes_read].to_vec();
+            send_encrypted_with_ack_retries(
+                &mut transport,
+                &mut writer,
+                &mut reader,
+                &chunk_ack_id,
+                "FILE_CHUNK_RECEIVED",
+                || WireMessage::file_chunk_bin(&transfer_id, chunk_index, &data),
+                "FILE_CHUNK_BIN",
+            )?;
+        } else {
+            let data_hex = encode_hex(&buffer[..bytes_read]);
+            send_encrypted_with_ack_retries(
+                &mut transport,
+                &mut writer,
+                &mut reader,
+                &chunk_ack_id,
+                "FILE_CHUNK_RECEIVED",
+                || WireMessage::file_chunk(&transfer_id, chunk_index, &data_hex),
+                "FILE_CHUNK",
+            )?;
+        }
 
         chunk_index += 1;
     }

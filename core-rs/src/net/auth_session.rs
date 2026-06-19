@@ -17,13 +17,17 @@ use std::sync::Arc;
 use crate::crypto::{NoiseHandshake, NoiseTransport};
 use crate::{new_handshake_nonce, LocalIdentity, TrustStore};
 
-use super::ack::{parse_file_start_ack_status, write_message, ACK_TIMEOUT};
+use super::ack::{
+    file_start_ack_supports_bin, parse_file_start_ack_status, write_message, ACK_TIMEOUT,
+};
 use super::file_transfer::{
     file_chunk_ack_id, file_sha256_hex, file_start_ack_status, partial_file_path,
     receive_metadata_path, received_bytes_after_chunk, received_file_path,
     reusable_receive_progress_metadata, FileReceiveState,
 };
-use super::protocol::{decode_hex, encode_hex, parse_message, serialize_message, WireMessage};
+use super::protocol::{
+    decode_hex, encode_hex, parse_binary_frame, parse_message, serialize_message_bytes, WireMessage,
+};
 use super::{FileReceivedCallback, LocalDevice, ReceivedFileEvent};
 
 pub(super) fn run_authenticated_session(
@@ -283,19 +287,19 @@ pub(super) fn run_authenticated_session_over<W: Write, R: BufRead>(
                     );
                 }
 
+                // The `+bin` suffix advertises that this encrypted receiver
+                // accepts binary-framed chunks (T8); v1 senders ignore it.
+                let resume_status = file_start_ack_status(
+                    sha256_hex.is_some(),
+                    file_receivers
+                        .get(&transfer_id)
+                        .map(|receiver| receiver.next_chunk_index)
+                        .unwrap_or(0),
+                );
                 send_encrypted_frame(
                     &mut transport,
                     &mut writer,
-                    &WireMessage::ack(
-                        &transfer_id,
-                        &file_start_ack_status(
-                            sha256_hex.is_some(),
-                            file_receivers
-                                .get(&transfer_id)
-                                .map(|receiver| receiver.next_chunk_index)
-                                .unwrap_or(0),
-                        ),
-                    ),
+                    &WireMessage::ack(&transfer_id, &format!("{resume_status}+bin")),
                 )?;
             }
             Ok(WireMessage::FileChunk {
@@ -303,66 +307,35 @@ pub(super) fn run_authenticated_session_over<W: Write, R: BufRead>(
                 chunk_index,
                 data_hex,
             }) => {
-                let chunk_ack_id = file_chunk_ack_id(&transfer_id, chunk_index);
-                let Some(receiver) = file_receivers.get_mut(&transfer_id) else {
-                    eprintln!(
-                        "Ignored authenticated file chunk for unknown transfer: {transfer_id}"
-                    );
-                    continue;
-                };
-
-                if chunk_index < receiver.next_chunk_index {
-                    println!(
-                        "Duplicate authenticated file chunk from {peer_device_id} [{transfer_id}#{chunk_index}] acknowledged again"
-                    );
-                    send_encrypted_frame(
-                        &mut transport,
-                        &mut writer,
-                        &WireMessage::ack(&chunk_ack_id, "FILE_CHUNK_RECEIVED"),
-                    )?;
-                    continue;
-                }
-
-                if chunk_index != receiver.next_chunk_index {
-                    eprintln!(
-                        "Ignored out-of-order authenticated file chunk from {peer_device_id} [{transfer_id}#{chunk_index}], expected {}",
-                        receiver.next_chunk_index
-                    );
-                    continue;
-                }
-
                 let bytes = decode_hex(&data_hex).map_err(|err| {
                     io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("invalid authenticated file chunk hex for {transfer_id}#{chunk_index}: {err}"),
                     )
                 })?;
-                let Some(next_received_bytes) = received_bytes_after_chunk(
-                    receiver.received_bytes,
-                    bytes.len(),
-                    receiver.size_bytes,
-                ) else {
-                    eprintln!(
-                        "Ignored oversized authenticated file chunk from {peer_device_id} [{transfer_id}#{chunk_index}]: would exceed declared size {} bytes",
-                        receiver.size_bytes
-                    );
-                    continue;
-                };
-
-                receiver.file.write_all(&bytes)?;
-                receiver.received_bytes = next_received_bytes;
-                receiver.next_chunk_index += 1;
-                receiver.file.flush()?;
-                receiver.write_progress_metadata()?;
-
-                println!(
-                    "Authenticated file chunk from {peer_device_id} [{transfer_id}#{chunk_index}]: {} bytes",
-                    bytes.len()
-                );
-                send_encrypted_frame(
+                receive_file_chunk(
                     &mut transport,
                     &mut writer,
-                    &WireMessage::ack(&chunk_ack_id, "FILE_CHUNK_RECEIVED"),
+                    &mut file_receivers,
+                    &peer_device_id,
+                    &transfer_id,
+                    chunk_index,
+                    bytes,
+                )?;
+            }
+            Ok(WireMessage::FileChunkBin {
+                transfer_id,
+                chunk_index,
+                data,
+            }) => {
+                receive_file_chunk(
+                    &mut transport,
+                    &mut writer,
+                    &mut file_receivers,
+                    &peer_device_id,
+                    &transfer_id,
+                    chunk_index,
+                    data,
                 )?;
             }
             Ok(WireMessage::FileEnd { transfer_id }) => {
@@ -514,13 +487,16 @@ pub(super) fn send_encrypted_with_ack_retries<W: Write, R: BufRead>(
         .unwrap_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "ACK retry attempts exhausted")))
 }
 
+/// Returns `(resume_from_chunk, peer_supports_binary_chunks)`. The second flag
+/// reflects the T8 `+bin` capability the receiver advertises in its FILE_START
+/// ack; when false the sender must keep using hex-coded chunks.
 pub(super) fn send_encrypted_file_start_with_retries<W: Write, R: BufRead>(
     transport: &mut NoiseTransport,
     writer: &mut W,
     reader: &mut R,
     transfer_id: &str,
     make_message: impl Fn() -> WireMessage,
-) -> io::Result<u64> {
+) -> io::Result<(u64, bool)> {
     let mut last_error = None;
 
     for attempt in 1..=3 {
@@ -538,8 +514,9 @@ pub(super) fn send_encrypted_file_start_with_retries<W: Write, R: BufRead>(
                     ));
                     continue;
                 };
+                let supports_bin = file_start_ack_supports_bin(&status);
                 println!("Delivery acknowledged: {message_id} {status}");
-                return Ok(resume_from_chunk);
+                return Ok((resume_from_chunk, supports_bin));
             }
             Ok(WireMessage::Ack { message_id, status }) => {
                 last_error = Some(io::Error::new(
@@ -571,14 +548,79 @@ pub(super) fn send_encrypted_file_start_with_retries<W: Write, R: BufRead>(
     }))
 }
 
+/// Apply one received file chunk (already raw bytes) to the in-progress receiver
+/// state: dedup, in-order check, declared-size cap, append, and ack. Shared by
+/// the hex [`WireMessage::FileChunk`] and binary [`WireMessage::FileChunkBin`]
+/// arms of the encrypted receive loop so both framings behave identically.
+fn receive_file_chunk<W: Write>(
+    transport: &mut NoiseTransport,
+    writer: &mut W,
+    file_receivers: &mut HashMap<String, FileReceiveState>,
+    peer_device_id: &str,
+    transfer_id: &str,
+    chunk_index: u64,
+    bytes: Vec<u8>,
+) -> io::Result<()> {
+    let chunk_ack_id = file_chunk_ack_id(transfer_id, chunk_index);
+    let Some(receiver) = file_receivers.get_mut(transfer_id) else {
+        eprintln!("Ignored authenticated file chunk for unknown transfer: {transfer_id}");
+        return Ok(());
+    };
+
+    if chunk_index < receiver.next_chunk_index {
+        println!(
+            "Duplicate authenticated file chunk from {peer_device_id} [{transfer_id}#{chunk_index}] acknowledged again"
+        );
+        return send_encrypted_frame(
+            transport,
+            writer,
+            &WireMessage::ack(&chunk_ack_id, "FILE_CHUNK_RECEIVED"),
+        );
+    }
+
+    if chunk_index != receiver.next_chunk_index {
+        eprintln!(
+            "Ignored out-of-order authenticated file chunk from {peer_device_id} [{transfer_id}#{chunk_index}], expected {}",
+            receiver.next_chunk_index
+        );
+        return Ok(());
+    }
+
+    let Some(next_received_bytes) =
+        received_bytes_after_chunk(receiver.received_bytes, bytes.len(), receiver.size_bytes)
+    else {
+        eprintln!(
+            "Ignored oversized authenticated file chunk from {peer_device_id} [{transfer_id}#{chunk_index}]: would exceed declared size {} bytes",
+            receiver.size_bytes
+        );
+        return Ok(());
+    };
+
+    receiver.file.write_all(&bytes)?;
+    receiver.received_bytes = next_received_bytes;
+    receiver.next_chunk_index += 1;
+    receiver.file.flush()?;
+    receiver.write_progress_metadata()?;
+
+    println!(
+        "Authenticated file chunk from {peer_device_id} [{transfer_id}#{chunk_index}]: {} bytes",
+        bytes.len()
+    );
+    send_encrypted_frame(
+        transport,
+        writer,
+        &WireMessage::ack(&chunk_ack_id, "FILE_CHUNK_RECEIVED"),
+    )
+}
+
 fn send_encrypted_frame<W: Write>(
     transport: &mut NoiseTransport,
     writer: &mut W,
     message: &WireMessage,
 ) -> io::Result<()> {
-    let plaintext = serialize_message(message);
+    let plaintext = serialize_message_bytes(message);
     let ciphertext = transport
-        .encrypt(plaintext.as_bytes())
+        .encrypt(&plaintext)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     if ciphertext.len() > u16::MAX as usize {
         return Err(io::Error::new(
@@ -604,9 +646,7 @@ fn recv_encrypted_frame<R: BufRead>(
     let plaintext = transport
         .decrypt(&ciphertext)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    let line = String::from_utf8(plaintext)
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    parse_message(&line).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    parse_binary_frame(&plaintext).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
 pub(super) fn open_authenticated_stream(
@@ -983,6 +1023,99 @@ mod transport_tests {
         assert!(
             responder_result.is_ok(),
             "responder session should end Ok on EOF, got {responder_result:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&receive_dir);
+    }
+
+    #[test]
+    fn authenticated_binary_file_round_trips_over_in_memory_transport() {
+        // End-to-end proof of T8: the sender negotiates the receiver's `+bin`
+        // capability and ships raw (non-hex) chunks; a multi-chunk file whose
+        // bytes include tab/CR/LF/NUL/0xFF must reassemble byte-for-byte.
+        let now = SystemTime::now();
+        let initiator = LocalIdentity::generate("Initiator", now);
+        let responder = LocalIdentity::generate("Responder", now);
+        let responder_dh = dh_bytes(&responder);
+
+        let mut trust = TrustStore::new();
+        trust.trust(TrustedDevice::new(initiator.identity().clone(), now));
+        let trust = Arc::new(trust);
+
+        let receive_dir = std::env::temp_dir().join(format!(
+            "linkhub-bin-{}-{:?}",
+            now.duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            thread::current().id()
+        ));
+        std::fs::create_dir_all(&receive_dir).unwrap();
+
+        // 9000 bytes spans 3 chunks (FILE_CHUNK_SIZE = 4096); the trailing bytes
+        // would corrupt any tab/newline-delimited text protocol.
+        let mut payload: Vec<u8> = (0u32..9000).map(|i| (i % 256) as u8).collect();
+        payload.extend_from_slice(b"\t\r\n\x00\xff tail");
+        let src_path = receive_dir.join("payload.bin");
+        std::fs::write(&src_path, &payload).unwrap();
+
+        let (initiator_end, responder_end) = MemoryDuplex::pair();
+        let resp_writer = responder_end.handle();
+        let resp_reader = BufReader::new(responder_end.handle());
+
+        let responder_identity = responder.clone();
+        let receive_dir_for_thread = receive_dir.clone();
+        let responder_thread = thread::spawn(move || {
+            run_authenticated_session_over(
+                resp_writer,
+                resp_reader,
+                responder_identity,
+                trust,
+                receive_dir_for_thread,
+                None,
+            )
+        });
+
+        let init_writer = initiator_end.handle();
+        let init_reader = BufReader::new(initiator_end.handle());
+        crate::net::run_authenticated_file_sender_over(
+            init_writer,
+            init_reader,
+            &initiator,
+            responder.device_id(),
+            &responder_dh,
+            &src_path,
+        )
+        .expect("binary file send should complete over memory transport");
+
+        initiator_end.close_tx();
+        let responder_result = responder_thread.join().expect("responder thread panicked");
+        assert!(
+            responder_result.is_ok(),
+            "responder session should end Ok on EOF, got {responder_result:?}"
+        );
+
+        // The receiver writes the reassembled file under receive_dir; find the
+        // one whose bytes match the source exactly (excluding the source file).
+        let mut matched = false;
+        for entry in std::fs::read_dir(&receive_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path == src_path || !path.is_file() {
+                continue;
+            }
+            let mut got = Vec::new();
+            if File::open(&path)
+                .and_then(|mut file| file.read_to_end(&mut got))
+                .is_ok()
+                && got == payload
+            {
+                matched = true;
+                break;
+            }
+        }
+        assert!(
+            matched,
+            "a received file matching the {}-byte source must exist in {receive_dir:?}",
+            payload.len()
         );
 
         let _ = std::fs::remove_dir_all(&receive_dir);
