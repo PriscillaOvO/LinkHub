@@ -1,0 +1,38 @@
+# XcodeGen project definition — run `xcodegen generate` in ios/ to produce
+# LinkHub.xcodeproj (we keep this text file under version control instead of a
+# hand-maintained .pbxproj). Install: `brew install xcodegen`.
+name: LinkHub
+options:
+  bundleIdPrefix: com.linkhub
+  deploymentTarget:
+    iOS: "14.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+targets:
+  LinkHub:
+    type: application
+    platform: iOS
+    sources:
+      - path: LinkHub/LinkHub
+    info:
+      path: LinkHub/Info.plist
+      properties:
+        CFBundleDisplayName: LinkHub
+        UILaunchScreen: {}
+        # iOS 14+ gates all local-network traffic (incl. Bonjour) behind this
+        # consent string + an explicit allow-list of the service types used.
+        NSLocalNetworkUsageDescription: "LinkHub uses the local network to discover and securely connect to your nearby trusted devices."
+        NSBonjourServices:
+          - _linkhub._tcp
+    settings:
+      base:
+        # Lets Swift resolve include/module.modulemap as `import LinkHubCoreFFI`.
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/include
+        # Apple frameworks the Rust staticlib needs (getrandom → SecRandom).
+        OTHER_LDFLAGS: -lc++ -framework Security
+    dependencies:
+      # Static xcframework produced by scripts/build-core-ios.sh (not embedded).
+      - framework: Frameworks/LinkHubCore.xcframework
+        embed: false

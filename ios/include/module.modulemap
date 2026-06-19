@@ -1,0 +1,7 @@
+// Exposes the Rust core's C ABI to Swift as `import LinkHubCoreFFI`.
+// Add this directory to the target's "Import Paths" / SWIFT_INCLUDE_PATHS
+// (XcodeGen project.yml already wires it up).
+module LinkHubCoreFFI {
+    header "linkhub_core.h"
+    export *
+}

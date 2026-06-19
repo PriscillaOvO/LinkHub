@@ -5,7 +5,9 @@ edition = "2021"
 
 [lib]
 name = "linkhub_core"
-crate-type = ["lib", "cdylib"]
+# `lib` = desktop/CLI rlib; `cdylib` = Android .so; `staticlib` = iOS .a linked
+# into the app via ios/Frameworks/LinkHubCore.xcframework (see ios/README.md).
+crate-type = ["lib", "cdylib", "staticlib"]
 
 [[bin]]
 name = "linkhub-cli"
