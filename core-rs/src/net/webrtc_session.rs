@@ -61,6 +61,7 @@ pub fn send_file_over_webrtc(
         },
         local_rx,
         remote_tx,
+        None,
     )?;
 
     let established = runtime.block_on(connect_initiator(ice, local_tx, remote_rx, handle));
@@ -92,6 +93,28 @@ pub fn receive_file_over_webrtc(
     ice: IceConfig,
     on_file: Option<FileReceivedCallback>,
 ) -> io::Result<()> {
+    receive_file_over_webrtc_until(
+        ws_url,
+        identity,
+        trust_store,
+        receive_dir,
+        ice,
+        on_file,
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
+/// Like [`receive_file_over_webrtc`], but exits cleanly when `stop` is set while
+/// waiting for a signaling offer. Active file sessions still run to completion.
+pub fn receive_file_over_webrtc_until(
+    ws_url: &str,
+    identity: LocalIdentity,
+    trust_store: Arc<TrustStore>,
+    receive_dir: impl AsRef<Path>,
+    ice: IceConfig,
+    on_file: Option<FileReceivedCallback>,
+    stop: Arc<AtomicBool>,
+) -> io::Result<()> {
     let runtime = new_runtime()?;
     let handle = runtime.handle().clone();
     let (local_tx, local_rx) = unbounded_channel::<SdpSignal>();
@@ -105,10 +128,14 @@ pub fn receive_file_over_webrtc(
         },
         local_rx,
         remote_tx,
+        Some(Arc::clone(&stop)),
     )?;
 
     let established = runtime.block_on(accept_responder(ice, local_tx, remote_rx, handle));
     let bridge_result = bridge.stop();
+    if stop.load(Ordering::Relaxed) && established.is_err() {
+        return Ok(());
+    }
     let duplex = finish_establishment(established, bridge_result)?;
 
     let writer = duplex.clone();
@@ -157,8 +184,9 @@ fn start_signaling_bridge(
     role: SignalingRole,
     mut outbound_sdp: UnboundedReceiver<SdpSignal>,
     inbound_sdp: UnboundedSender<SdpSignal>,
+    external_stop: Option<Arc<AtomicBool>>,
 ) -> io::Result<RunningSignalingBridge> {
-    let stop = Arc::new(AtomicBool::new(false));
+    let stop = external_stop.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     let stop_for_thread = Arc::clone(&stop);
     let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
 

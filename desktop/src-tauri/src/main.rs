@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::net::{TcpListener, UdpSocket};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -34,6 +34,41 @@ fn listener_state() -> &'static ListenerState {
         last_error: Mutex::new(String::new()),
         handle: Mutex::new(None),
     })
+}
+
+struct WebRtcReceiverState {
+    running: AtomicBool,
+    stopping: AtomicBool,
+    completed_sessions: Mutex<u64>,
+    last_error: Mutex<String>,
+    stop: Mutex<Option<Arc<AtomicBool>>>,
+    handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+fn webrtc_receiver_state() -> &'static WebRtcReceiverState {
+    static STATE: OnceLock<WebRtcReceiverState> = OnceLock::new();
+    STATE.get_or_init(|| WebRtcReceiverState {
+        running: AtomicBool::new(false),
+        stopping: AtomicBool::new(false),
+        completed_sessions: Mutex::new(0),
+        last_error: Mutex::new(String::new()),
+        stop: Mutex::new(None),
+        handle: Mutex::new(None),
+    })
+}
+
+fn reap_webrtc_receiver_if_finished(state: &WebRtcReceiverState) {
+    let mut handle_guard = state.handle.lock().unwrap();
+    let finished = handle_guard
+        .as_ref()
+        .map(|handle| handle.is_finished())
+        .unwrap_or(false);
+    if finished {
+        if let Some(handle) = handle_guard.take() {
+            let _ = handle.join();
+        }
+        *state.stop.lock().unwrap() = None;
+    }
 }
 
 struct MdnsAdvertiseHandle {
@@ -93,6 +128,14 @@ struct SendResult {
     success: bool,
     message_id: String,
     detail: String,
+}
+
+#[derive(Clone, Serialize)]
+struct WebRtcReceiverStatus {
+    running: bool,
+    stopping: bool,
+    completed_sessions: u64,
+    error: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -796,6 +839,135 @@ async fn webrtc_receive_file(
     })
 }
 
+fn webrtc_receiver_status_snapshot() -> WebRtcReceiverStatus {
+    let state = webrtc_receiver_state();
+    reap_webrtc_receiver_if_finished(state);
+    WebRtcReceiverStatus {
+        running: state.running.load(Ordering::Relaxed),
+        stopping: state.stopping.load(Ordering::Relaxed),
+        completed_sessions: *state.completed_sessions.lock().unwrap(),
+        error: state.last_error.lock().unwrap().clone(),
+    }
+}
+
+#[tauri::command]
+fn webrtc_receiver_status() -> WebRtcReceiverStatus {
+    webrtc_receiver_status_snapshot()
+}
+
+#[cfg(not(feature = "webrtc"))]
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn webrtc_start_receiver(
+    _signaling_url: String,
+    _identity_path: String,
+    _trust_store_path: String,
+    _receive_dir: String,
+    _ice_urls: Vec<String>,
+    _turn_username: Option<String>,
+    _turn_credential: Option<String>,
+    _relay_only: bool,
+) -> Result<WebRtcReceiverStatus, String> {
+    Err("此构建未启用跨网络 (WebRTC) 功能，请用 `--features webrtc` 重新构建".into())
+}
+
+#[cfg(feature = "webrtc")]
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn webrtc_start_receiver(
+    signaling_url: String,
+    identity_path: String,
+    trust_store_path: String,
+    receive_dir: String,
+    ice_urls: Vec<String>,
+    turn_username: Option<String>,
+    turn_credential: Option<String>,
+    relay_only: bool,
+) -> Result<WebRtcReceiverStatus, String> {
+    let state = webrtc_receiver_state();
+    reap_webrtc_receiver_if_finished(state);
+    if state.running.load(Ordering::Relaxed) {
+        return Ok(webrtc_receiver_status_snapshot());
+    }
+
+    let identity = load_identity(&identity_path)?;
+    let trust_store = Arc::new(
+        TrustStore::load_from_path(&trust_store_path)
+            .map_err(|e| format!("failed to load trust store: {e}"))?,
+    );
+    let ice = build_ice_config(ice_urls, turn_username, turn_credential, relay_only);
+    let stop = Arc::new(AtomicBool::new(false));
+
+    state.running.store(true, Ordering::Relaxed);
+    state.stopping.store(false, Ordering::Relaxed);
+    *state.completed_sessions.lock().unwrap() = 0;
+    *state.last_error.lock().unwrap() = String::new();
+    *state.stop.lock().unwrap() = Some(Arc::clone(&stop));
+
+    let handle = std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            let result = linkhub_core::net::webrtc_session::receive_file_over_webrtc_until(
+                &signaling_url,
+                identity.clone(),
+                Arc::clone(&trust_store),
+                &receive_dir,
+                ice.clone(),
+                None,
+                Arc::clone(&stop),
+            );
+
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+
+            match result {
+                Ok(()) => {
+                    let state = webrtc_receiver_state();
+                    let mut completed = state.completed_sessions.lock().unwrap();
+                    *completed += 1;
+                    *state.last_error.lock().unwrap() = String::new();
+                }
+                Err(err) => {
+                    let state = webrtc_receiver_state();
+                    let message = err.to_string();
+                    *state.last_error.lock().unwrap() = message.clone();
+                    eprintln!("WebRTC receiver loop error: {message}");
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+        }
+
+        let state = webrtc_receiver_state();
+        state.running.store(false, Ordering::Relaxed);
+        state.stopping.store(false, Ordering::Relaxed);
+    });
+
+    *state.handle.lock().unwrap() = Some(handle);
+    Ok(webrtc_receiver_status_snapshot())
+}
+
+#[cfg(not(feature = "webrtc"))]
+#[tauri::command]
+fn webrtc_stop_receiver() -> Result<WebRtcReceiverStatus, String> {
+    Err("此构建未启用跨网络 (WebRTC) 功能，请用 `--features webrtc` 重新构建".into())
+}
+
+#[cfg(feature = "webrtc")]
+#[tauri::command]
+fn webrtc_stop_receiver() -> Result<WebRtcReceiverStatus, String> {
+    let state = webrtc_receiver_state();
+    reap_webrtc_receiver_if_finished(state);
+    if !state.running.load(Ordering::Relaxed) {
+        return Ok(webrtc_receiver_status_snapshot());
+    }
+
+    state.stopping.store(true, Ordering::Relaxed);
+    if let Some(stop) = state.stop.lock().unwrap().as_ref() {
+        stop.store(true, Ordering::Relaxed);
+    }
+    Ok(webrtc_receiver_status_snapshot())
+}
+
 // ── History commands ───────────────────────────────────────────────
 
 #[tauri::command]
@@ -1070,6 +1242,9 @@ fn main() {
             connection_plan,
             webrtc_send_file,
             webrtc_receive_file,
+            webrtc_start_receiver,
+            webrtc_stop_receiver,
+            webrtc_receiver_status,
             get_history,
             clear_history,
             start_listener,
@@ -1278,6 +1453,14 @@ mod tests {
         // Blank LAN address is treated as absent.
         let plan_blank = connection_plan(Some("   ".into()), false, false);
         assert!(plan_blank.is_empty());
+    }
+
+    #[test]
+    fn smoke_webrtc_receiver_status_starts_stopped() {
+        let status = webrtc_receiver_status();
+        assert!(!status.running);
+        assert!(!status.stopping);
+        assert_eq!(status.completed_sessions, 0);
     }
 
     #[test]

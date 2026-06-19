@@ -2,6 +2,7 @@
 
 let cachedPeers = [];
 let pendingSendSelection = null;
+let webrtcReceiverPoll = null;
 // Tracks the last address auto-filled per kind, so background discovery can
 // refresh it without clobbering a value the user typed manually.
 let lastAutoAddr = { text: '', file: '' };
@@ -90,9 +91,11 @@ function buildSendTab() {
       </div>
       <div class="inline-row">
         <button class="btn btn-primary" data-act="webrtcSendFile">跨网络发送文件</button>
-        <button class="btn btn-secondary" data-act="webrtcReceiveOnce">监听一次接收</button>
+        <button class="btn btn-secondary" id="wrtc-start-receiver" data-act="webrtcStartReceiver">开始接收</button>
+        <button class="btn btn-secondary" id="wrtc-stop-receiver" data-act="webrtcStopReceiver">停止接收</button>
         <button class="btn btn-secondary" data-act="previewConnectionPlan">查看连接路径</button>
       </div>
+      <div id="wrtc-receiver-status" class="hint">接收未启动</div>
       <div id="wrtc-plan" class="hint"></div>
     </div>
     <div id="send-msg"></div>
@@ -125,6 +128,7 @@ async function renderSendTab() {
     const wrtcSelect = document.getElementById('wrtc-device-select');
     if (wrtcSelect) wrtcSelect.innerHTML = opts;
     applyPendingSendSelection();
+    refreshWebrtcReceiverStatus();
   } catch (err) {
     showMessage('send-msg', '加载设备失败：' + err.message, 'error');
   }
@@ -334,27 +338,88 @@ async function webrtcSendFile() {
 }
 
 async function webrtcReceiveOnce() {
+  return webrtcStartReceiver();
+}
+
+function webrtcReceiverArgs() {
   const identityPath = getSetting('identityPath');
   const trustStorePath = getSetting('trustStorePath');
   const receiveDir = getSetting('receiveDir');
   const signalingUrl = document.getElementById('wrtc-signaling').value.trim();
-  if (!signalingUrl) {
+  const ice = webrtcIceArgs();
+  return {
+    signalingUrl,
+    identityPath,
+    trustStorePath,
+    receiveDir,
+    iceUrls: ice.iceUrls,
+    turnUsername: ice.turnUsername,
+    turnCredential: ice.turnCredential,
+    relayOnly: ice.relayOnly,
+  };
+}
+
+function renderWebrtcReceiverStatus(status) {
+  const el = document.getElementById('wrtc-receiver-status');
+  const startBtn = document.getElementById('wrtc-start-receiver');
+  const stopBtn = document.getElementById('wrtc-stop-receiver');
+  if (!el) return;
+  const running = Boolean(status && status.running);
+  const stopping = Boolean(status && status.stopping);
+  const completed = status && Number.isFinite(status.completed_sessions) ? status.completed_sessions : 0;
+  const error = status && status.error ? `，最近错误：${status.error}` : '';
+  el.textContent = stopping
+    ? `接收正在停止，已完成 ${completed} 次${error}`
+    : running
+      ? `接收运行中，已完成 ${completed} 次${error}`
+      : `接收未启动，已完成 ${completed} 次${error}`;
+  if (startBtn) startBtn.disabled = running;
+  if (stopBtn) stopBtn.disabled = !running;
+}
+
+async function refreshWebrtcReceiverStatus() {
+  try {
+    const status = await tauriInvoke('webrtc_receiver_status');
+    renderWebrtcReceiverStatus(status);
+  } catch (_) {
+    renderWebrtcReceiverStatus({ running: false, stopping: false, completed_sessions: 0, error: '' });
+  }
+}
+
+function ensureWebrtcReceiverPoll() {
+  if (webrtcReceiverPoll) return;
+  webrtcReceiverPoll = setInterval(refreshWebrtcReceiverStatus, 3000);
+}
+
+async function webrtcStartReceiver() {
+  const args = webrtcReceiverArgs();
+  if (!args.signalingUrl) {
     showMessage('send-msg', '请填写信令服务器', 'error');
     return;
   }
-  const ice = webrtcIceArgs();
-  setStatus('正在等待跨网络接收（监听一次）…', 'info');
+  setStatus('正在启动跨网络接收…', 'info');
   try {
-    const result = await tauriInvoke('webrtc_receive_file', {
-      signalingUrl, identityPath, trustStorePath, receiveDir,
-      iceUrls: ice.iceUrls, turnUsername: ice.turnUsername,
-      turnCredential: ice.turnCredential, relayOnly: ice.relayOnly,
-    });
-    showMessage('send-msg', result.detail, 'success');
-    setStatus('跨网络接收完成', 'ok');
+    const status = await tauriInvoke('webrtc_start_receiver', args);
+    renderWebrtcReceiverStatus(status);
+    ensureWebrtcReceiverPoll();
+    showMessage('send-msg', '跨网络接收已启动', 'success');
+    setStatus('跨网络接收运行中', 'ok');
   } catch (err) {
-    showMessage('send-msg', '跨网络接收错误：' + err.message, 'error');
-    setStatus('跨网络接收失败', 'error');
+    showMessage('send-msg', '启动跨网络接收错误：' + err.message, 'error');
+    setStatus('跨网络接收启动失败', 'error');
+  }
+}
+
+async function webrtcStopReceiver() {
+  setStatus('正在停止跨网络接收…', 'info');
+  try {
+    const status = await tauriInvoke('webrtc_stop_receiver');
+    renderWebrtcReceiverStatus(status);
+    showMessage('send-msg', status.stopping ? '跨网络接收正在停止' : '跨网络接收已停止', 'success');
+    setStatus(status.stopping ? '跨网络接收正在停止' : '跨网络接收已停止', 'ok');
+  } catch (err) {
+    showMessage('send-msg', '停止跨网络接收错误：' + err.message, 'error');
+    setStatus('跨网络接收停止失败', 'error');
   }
 }
 
@@ -382,3 +447,4 @@ async function previewConnectionPlan() {
 
 // Init on load
 buildSendTab();
+refreshWebrtcReceiverStatus();
