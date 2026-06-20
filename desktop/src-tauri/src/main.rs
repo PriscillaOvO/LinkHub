@@ -971,6 +971,8 @@ fn connection_plan(
     let reachability = PeerReachability {
         lan_addr: lan_addr.filter(|addr| !addr.trim().is_empty()),
         signaling_available,
+        // Onion path is wired into the desktop UI in a later phase; not surfaced yet.
+        onion_addr: None,
         relay_available,
     };
     plan_connection(&reachability)
@@ -986,6 +988,11 @@ fn connection_plan(
                 kind: "webrtc".into(),
                 label: "打洞直连 (WebRTC)".into(),
                 detail: String::new(),
+            },
+            ConnectionPath::Onion { addr } => TransportPath {
+                kind: "onion".into(),
+                label: "Tor 匿名连接 (.onion)".into(),
+                detail: addr.clone(),
             },
             ConnectionPath::CloudRelay => TransportPath {
                 kind: "relay".into(),

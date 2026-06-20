@@ -198,10 +198,19 @@ impl LocalIdentity {
     /// same seed by the Tor transport (feature-gated); this returns only the
     /// public address, so it stays in the default build.
     pub fn onion_address(&self) -> Result<String, String> {
-        let signing_key_seed = hex_array::<32>(&self.signing_key_hex)?;
-        let hs_seed = derive_onion_hs_seed(&signing_key_seed);
+        let hs_seed = self.onion_hs_seed()?;
         let hs_public_key = SigningKey::from_bytes(&hs_seed).verifying_key().to_bytes();
         Ok(onion_address_v3(&hs_public_key))
+    }
+
+    /// The 32-byte seed for this device's hidden-service key, derived from the
+    /// Ed25519 signing key (domain-separated; see [`super::onion`]). The Tor
+    /// transport (feature-gated) builds the HS keypair from this to *host* the
+    /// onion service at [`Self::onion_address`]. Secret-derived — never share it;
+    /// peers only ever receive the public `onion_address`.
+    pub fn onion_hs_seed(&self) -> Result<[u8; 32], String> {
+        let signing_key_seed = hex_array::<32>(&self.signing_key_hex)?;
+        Ok(derive_onion_hs_seed(&signing_key_seed))
     }
 
     pub fn created_at(&self) -> SystemTime {

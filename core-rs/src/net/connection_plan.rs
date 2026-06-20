@@ -23,6 +23,9 @@ pub enum ConnectionPath {
     LanTcp { addr: String },
     /// WebRTC P2P established via the signaling server (crosses NAT).
     WebRtc,
+    /// Tor onion service at a peer's identity-derived `.onion` address — crosses
+    /// NAT with no signaling/relay server, anonymously, but slowly (Phase 2/3).
+    Onion { addr: String },
     /// TURN/relay fallback when hole-punching fails (Stage 5 tail; placeholder).
     CloudRelay,
 }
@@ -33,6 +36,7 @@ impl ConnectionPath {
         match self {
             ConnectionPath::LanTcp { .. } => TransportKind::LanTcp,
             ConnectionPath::WebRtc => TransportKind::WebRtc,
+            ConnectionPath::Onion { .. } => TransportKind::Onion,
             ConnectionPath::CloudRelay => TransportKind::CloudRelay,
         }
     }
@@ -45,6 +49,9 @@ pub struct PeerReachability {
     pub lan_addr: Option<String>,
     /// Whether a signaling server connection is available for WebRTC.
     pub signaling_available: bool,
+    /// A paired peer's `.onion` address (from the trust store), if any — lets us
+    /// reach it over Tor with no server.
+    pub onion_addr: Option<String>,
     /// Whether a relay (TURN) fallback is configured.
     pub relay_available: bool,
 }
@@ -74,6 +81,9 @@ pub fn plan_connection(reachability: &PeerReachability) -> ConnectionPlan {
     }
     if reachability.signaling_available {
         paths.push(ConnectionPath::WebRtc);
+    }
+    if let Some(addr) = &reachability.onion_addr {
+        paths.push(ConnectionPath::Onion { addr: addr.clone() });
     }
     if reachability.relay_available {
         paths.push(ConnectionPath::CloudRelay);
@@ -123,10 +133,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plan_prefers_lan_then_webrtc_then_relay() {
+    fn plan_prefers_lan_then_webrtc_then_onion_then_relay() {
         let plan = plan_connection(&PeerReachability {
             lan_addr: Some("192.168.1.5:8787".into()),
             signaling_available: true,
+            onion_addr: Some("abc.onion".into()),
             relay_available: true,
         });
 
@@ -137,8 +148,28 @@ mod tests {
                     addr: "192.168.1.5:8787".into()
                 },
                 ConnectionPath::WebRtc,
+                ConnectionPath::Onion {
+                    addr: "abc.onion".into()
+                },
                 ConnectionPath::CloudRelay,
             ]
+        );
+    }
+
+    #[test]
+    fn plan_uses_onion_when_only_onion_known() {
+        let plan = plan_connection(&PeerReachability {
+            lan_addr: None,
+            signaling_available: false,
+            onion_addr: Some("xyz.onion".into()),
+            relay_available: false,
+        });
+
+        assert_eq!(
+            plan.paths,
+            vec![ConnectionPath::Onion {
+                addr: "xyz.onion".into()
+            }]
         );
     }
 
@@ -147,6 +178,7 @@ mod tests {
         let plan = plan_connection(&PeerReachability {
             lan_addr: None,
             signaling_available: true,
+            onion_addr: None,
             relay_available: false,
         });
 
@@ -164,6 +196,7 @@ mod tests {
         let plan = plan_connection(&PeerReachability {
             lan_addr: Some("10.0.0.9:8787".into()),
             signaling_available: true,
+            onion_addr: None,
             relay_available: false,
         });
 
@@ -183,6 +216,7 @@ mod tests {
         let plan = plan_connection(&PeerReachability {
             lan_addr: Some("10.0.0.9:8787".into()),
             signaling_available: true,
+            onion_addr: None,
             relay_available: false,
         });
 

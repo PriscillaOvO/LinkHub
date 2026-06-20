@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-#[cfg(feature = "webrtc")]
+#[cfg(any(feature = "webrtc", feature = "tor"))]
 use std::io::Write as _;
 #[cfg(feature = "webrtc")]
 use std::sync::Arc;
@@ -158,6 +158,8 @@ fn run() -> Result<(), String> {
         }
         "listen-webrtc" => run_listen_webrtc_command(&args),
         "connect-webrtc" => run_connect_webrtc_command(&args),
+        "listen-tor" => run_listen_tor_command(&args),
+        "connect-tor" => run_connect_tor_command(&args),
         "identity" => run_identity_command(&args),
         _ => Err(usage()),
     }
@@ -472,6 +474,12 @@ fn usage() -> String {
         ),
         &command_usage(
             "connect-webrtc <ws_url> <identity_path> <peer_device_id> <trust_store_path> <file_path> [--ice <url>...]",
+        ),
+        &command_usage(
+            "listen-tor <identity_path> <trust_store_path> [--receive-dir <dir>] [--bridge <line>]... [--pt-binary <path>] [--pt-protocol <name>]",
+        ),
+        &command_usage(
+            "connect-tor <peer_onion_addr> <identity_path> <peer_device_id> <trust_store_path> <file_path> [--bridge <line>]... [--pt-binary <path>] [--pt-protocol <name>]",
         ),
     ]
     .join("\n")
@@ -1290,6 +1298,215 @@ fn lookup_peer_identity(
         .trusted_device(peer_device_id)
         .map(|trusted| trusted.identity().clone())
         .ok_or_else(|| format!("peer device not found in trust store: {peer_device_id}"))
+}
+
+#[cfg(not(feature = "tor"))]
+fn run_listen_tor_command(_args: &[String]) -> Result<(), String> {
+    Err("listen-tor requires building linkhub-cli with --features tor".to_string())
+}
+
+#[cfg(not(feature = "tor"))]
+fn run_connect_tor_command(_args: &[String]) -> Result<(), String> {
+    Err("connect-tor requires building linkhub-cli with --features tor".to_string())
+}
+
+#[cfg(feature = "tor")]
+struct TorOptions {
+    positional: Vec<String>,
+    receive_dir: Option<String>,
+    bridge_lines: Vec<String>,
+    pt_binary: Option<String>,
+    pt_protocols: Vec<String>,
+}
+
+#[cfg(feature = "tor")]
+impl TorOptions {
+    /// Build optional bridge/PT settings: `--bridge` lines need `--pt-binary`
+    /// (path to lyrebird/obfs4proxy); `--pt-protocol` defaults to `obfs4`. No
+    /// `--bridge` => direct (only works where Tor isn't blocked).
+    fn bridges(&self) -> Result<Option<linkhub_core::net::tor_transport::BridgeSettings>, String> {
+        if self.bridge_lines.is_empty() {
+            return Ok(None);
+        }
+        let pt_binary = self
+            .pt_binary
+            .clone()
+            .ok_or_else(|| "bridges require --pt-binary <path to PT client>".to_string())?;
+        let protocols = if self.pt_protocols.is_empty() {
+            vec!["obfs4".to_string()]
+        } else {
+            self.pt_protocols.clone()
+        };
+        Ok(Some(linkhub_core::net::tor_transport::BridgeSettings {
+            bridge_lines: self.bridge_lines.clone(),
+            protocols,
+            pt_binary,
+        }))
+    }
+}
+
+#[cfg(feature = "tor")]
+fn split_tor_options(
+    args: &[String],
+    shape: &str,
+    allow_receive_dir: bool,
+) -> Result<TorOptions, String> {
+    let mut positional = Vec::new();
+    let mut receive_dir = None;
+    let mut bridge_lines = Vec::new();
+    let mut pt_binary = None;
+    let mut pt_protocols = Vec::new();
+    let usage = || format!("usage: {}", command_usage(shape));
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--receive-dir" if allow_receive_dir => {
+                i += 1;
+                receive_dir = Some(args.get(i).ok_or_else(usage)?.clone());
+            }
+            "--bridge" => {
+                i += 1;
+                bridge_lines.push(args.get(i).ok_or_else(usage)?.clone());
+            }
+            "--pt-binary" => {
+                i += 1;
+                pt_binary = Some(args.get(i).ok_or_else(usage)?.clone());
+            }
+            "--pt-protocol" => {
+                i += 1;
+                pt_protocols.push(args.get(i).ok_or_else(usage)?.clone());
+            }
+            _ => positional.push(args[i].clone()),
+        }
+        i += 1;
+    }
+
+    Ok(TorOptions {
+        positional,
+        receive_dir,
+        bridge_lines,
+        pt_binary,
+        pt_protocols,
+    })
+}
+
+#[cfg(feature = "tor")]
+fn run_listen_tor_command(args: &[String]) -> Result<(), String> {
+    let shape = "listen-tor <identity_path> <trust_store_path> [--receive-dir <dir>] [--bridge <line>]... [--pt-binary <path>] [--pt-protocol <name>]";
+    let options = split_tor_options(args, shape, true)?;
+    if options.positional.len() != 2 {
+        return Err(format!("usage: {}", command_usage(shape)));
+    }
+
+    let identity = load_local_identity_arg(&options.positional[0])
+        .map_err(|err| format!("failed to load identity {}: {err}", options.positional[0]))?;
+    let trust_store = std::sync::Arc::new(
+        TrustStore::load_from_path(&options.positional[1]).map_err(|err| {
+            format!(
+                "failed to load trust store {}: {err}",
+                options.positional[1]
+            )
+        })?,
+    );
+    let receive_dir = options
+        .receive_dir
+        .clone()
+        .unwrap_or_else(|| "received".to_string());
+    let bridges = options.bridges()?;
+
+    let over = if bridges.is_some() {
+        " over bridges"
+    } else {
+        ""
+    };
+    println!("Bootstrapping Tor (this can take a while{over})...");
+    let _ = std::io::stdout().flush();
+    let ctx = linkhub_core::net::tor_transport::TorContext::bootstrap(bridges)
+        .map_err(|err| format!("Tor bootstrap failed: {err}"))?;
+    let hs_seed = identity.onion_hs_seed()?;
+    let listener = ctx
+        .host_onion(&hs_seed, "linkhub")
+        .map_err(|err| format!("failed to launch onion service: {err}"))?;
+    println!(
+        "Tor onion listener for device_id={} at {}",
+        identity.device_id(),
+        listener.onion_address()
+    );
+    println!("Share that .onion address with paired peers. Waiting for connections...");
+    let _ = std::io::stdout().flush();
+
+    loop {
+        let stream = listener
+            .accept()
+            .map_err(|err| format!("onion accept failed: {err}"))?;
+        let identity = identity.clone();
+        let trust_store = std::sync::Arc::clone(&trust_store);
+        let receive_dir = receive_dir.clone();
+        std::thread::spawn(move || {
+            let reader = std::io::BufReader::new(stream.clone());
+            if let Err(err) = linkhub_core::net::run_authenticated_responder_over(
+                stream,
+                reader,
+                identity,
+                trust_store,
+                receive_dir,
+                None,
+            ) {
+                eprintln!("Tor peer session ended with error: {err}");
+            }
+        });
+    }
+}
+
+#[cfg(feature = "tor")]
+fn run_connect_tor_command(args: &[String]) -> Result<(), String> {
+    let shape = "connect-tor <peer_onion_addr> <identity_path> <peer_device_id> <trust_store_path> <file_path> [--bridge <line>]... [--pt-binary <path>] [--pt-protocol <name>]";
+    let options = split_tor_options(args, shape, false)?;
+    if options.receive_dir.is_some() || options.positional.len() < 5 {
+        return Err(format!("usage: {}", command_usage(shape)));
+    }
+
+    let onion_addr = options.positional[0].clone();
+    let identity = load_local_identity_arg(&options.positional[1])
+        .map_err(|err| format!("failed to load identity {}: {err}", options.positional[1]))?;
+    let peer_device_id = options.positional[2].clone();
+    let trust_store = TrustStore::load_from_path(&options.positional[3]).map_err(|err| {
+        format!(
+            "failed to load trust store {}: {err}",
+            options.positional[3]
+        )
+    })?;
+    let file_path = options.positional[4..].join(" ");
+    let peer_dh = lookup_peer_dh_key(&trust_store, &peer_device_id)?;
+    let bridges = options.bridges()?;
+
+    let over = if bridges.is_some() {
+        " over bridges"
+    } else {
+        ""
+    };
+    println!("Bootstrapping Tor (this can take a while{over})...");
+    let _ = std::io::stdout().flush();
+    let ctx = linkhub_core::net::tor_transport::TorContext::bootstrap(bridges)
+        .map_err(|err| format!("Tor bootstrap failed: {err}"))?;
+    println!("Connecting to {onion_addr} over Tor...");
+    let _ = std::io::stdout().flush();
+    let stream = ctx
+        .connect_onion(&onion_addr)
+        .map_err(|err| format!("failed to connect to onion address: {err}"))?;
+    let reader = std::io::BufReader::new(stream.clone());
+    linkhub_core::net::run_authenticated_file_sender_over(
+        stream,
+        reader,
+        &identity,
+        &peer_device_id,
+        &peer_dh,
+        &file_path,
+    )
+    .map_err(|err| format!("failed to send authenticated file over Tor: {err}"))?;
+    println!("Tor file sent to {peer_device_id}");
+    Ok(())
 }
 
 fn render_status_text(identity: &LocalIdentity, trust_store: &TrustStore) -> String {

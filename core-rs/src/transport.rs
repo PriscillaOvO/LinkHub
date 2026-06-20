@@ -7,6 +7,7 @@ pub enum TransportKind {
     LanQuic,
     LanTcp,
     WebRtc,
+    Onion,
     BleControl,
     CloudRelay,
 }
@@ -17,6 +18,7 @@ impl fmt::Display for TransportKind {
             TransportKind::LanQuic => "LAN_QUIC",
             TransportKind::LanTcp => "LAN_TCP",
             TransportKind::WebRtc => "WEBRTC",
+            TransportKind::Onion => "ONION",
             TransportKind::BleControl => "BLE_CONTROL",
             TransportKind::CloudRelay => "CLOUD_RELAY",
         };
@@ -32,6 +34,7 @@ impl FromStr for TransportKind {
             "LAN_QUIC" => Ok(TransportKind::LanQuic),
             "LAN_TCP" => Ok(TransportKind::LanTcp),
             "WEBRTC" => Ok(TransportKind::WebRtc),
+            "ONION" => Ok(TransportKind::Onion),
             "BLE_CONTROL" => Ok(TransportKind::BleControl),
             "CLOUD_RELAY" => Ok(TransportKind::CloudRelay),
             _ => Err(format!("unknown transport kind: {value}")),
@@ -56,6 +59,9 @@ impl TransportHealth {
             TransportKind::LanQuic => 1_000,
             TransportKind::LanTcp => 900,
             TransportKind::WebRtc => 780,
+            // Onion: serverless cross-network + anonymous, but slow — preferred
+            // over a cloud relay, below LAN/WebRTC.
+            TransportKind::Onion => 500,
             TransportKind::BleControl => 280,
             TransportKind::CloudRelay => 420,
         };

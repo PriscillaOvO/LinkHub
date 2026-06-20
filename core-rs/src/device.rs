@@ -55,7 +55,9 @@ impl DeviceNode {
             Some(TransportKind::LanQuic | TransportKind::LanTcp | TransportKind::WebRtc) => {
                 ConnectionState::Connected
             }
-            Some(TransportKind::BleControl | TransportKind::CloudRelay) => {
+            // Onion transfers end-to-end but slowly — a working fallback, like a
+            // cloud relay, so it counts as Degraded rather than fully Connected.
+            Some(TransportKind::BleControl | TransportKind::CloudRelay | TransportKind::Onion) => {
                 ConnectionState::Degraded
             }
             None if self.transports.is_empty() => ConnectionState::Discovered,
