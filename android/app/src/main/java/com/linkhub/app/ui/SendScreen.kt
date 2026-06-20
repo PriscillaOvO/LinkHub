@@ -50,7 +50,10 @@ data class SendResultJson(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SendScreen() {
+fun SendScreen(
+    sharedUris: List<Uri> = emptyList(),
+    onSharedUrisConsumed: () -> Unit = {}
+) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     var identity by remember { mutableStateOf<IdentityJson?>(null) }
@@ -60,6 +63,7 @@ fun SendScreen() {
     var peerAddr by remember { mutableStateOf("") }
     var textInput by remember { mutableStateOf("") }
     var filePath by remember { mutableStateOf("/sdcard/Download/test.txt") }
+    var selectedFiles by remember { mutableStateOf<List<File>>(emptyList()) }
     var pickedFileName by remember { mutableStateOf("") }
     var statusMsg by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
@@ -79,6 +83,7 @@ fun SendScreen() {
         try {
             val picked = copyContentUriToSendCache(ctx, uri)
             filePath = picked.absolutePath
+            selectedFiles = listOf(picked)
             pickedFileName = picked.name
             statusMsg = "已选择文件: ${picked.name}"
         } catch (e: Exception) {
@@ -96,6 +101,28 @@ fun SendScreen() {
         } catch (_: Exception) {
         }
         loaded = true
+    }
+
+    LaunchedEffect(sharedUris) {
+        if (sharedUris.isEmpty()) return@LaunchedEffect
+        try {
+            val copied = sharedUris.map { uri -> copyContentUriToSendCache(ctx, uri) }
+            selectedFiles = copied
+            val first = copied.firstOrNull()
+            if (first != null) {
+                filePath = first.absolutePath
+                pickedFileName = if (copied.size == 1) first.name else "${first.name} 等 ${copied.size} 个文件"
+                statusMsg = if (copied.size == 1) {
+                    "已从系统分享导入: ${first.name}"
+                } else {
+                    "已从系统分享导入 ${copied.size} 个文件"
+                }
+            }
+        } catch (e: Exception) {
+            statusMsg = "分享文件导入失败: ${e.message}"
+        } finally {
+            onSharedUrisConsumed()
+        }
     }
 
     // Background auto-discovery: keep the selected device's LAN address
@@ -198,18 +225,20 @@ fun SendScreen() {
                                     onClick = {
                                         val currentIdentity = identity ?: return@Button
                                         val currentPeer = nearby.toTrustedPeer()
-                                        val currentPath = filePath.trim()
+                                        val currentPaths = selectedFiles
+                                            .map { it.absolutePath }
+                                            .ifEmpty { listOf(filePath.trim()) }
                                         val currentConfig = webRtcConfig
                                         saveWebRtcConfig(ctx, currentConfig)
                                         sending = true
                                         statusMsg = "正在发送文件到 ${nearby.deviceName}..."
                                         scope.launch {
-                                            statusMsg = sendFileAutoOnIo(
+                                            statusMsg = sendFilesAutoOnIo(
                                                 ctx,
                                                 gson,
                                                 currentIdentity,
                                                 currentPeer,
-                                                currentPath,
+                                                currentPaths,
                                                 currentConfig
                                             )
                                             sending = false
@@ -353,6 +382,7 @@ fun SendScreen() {
                 value = filePath,
                 onValueChange = {
                     filePath = it
+                    selectedFiles = emptyList()
                     pickedFileName = ""
                 },
                 label = { Text("文件路径") },
@@ -571,6 +601,37 @@ private suspend fun sendWebRtcFileOnIo(
         recordSendHistory(ctx, peer, "webrtc-file", filePath, false, status)
         showTransferNotification(ctx, peer, "webrtc-file", "跨网络文件发送失败", "${peer.deviceName}: $status")
         status
+    }
+}
+
+private suspend fun sendFilesAutoOnIo(
+    ctx: Context,
+    gson: Gson,
+    identity: IdentityJson,
+    peer: TrustedPeer,
+    filePaths: List<String>,
+    config: AndroidWebRtcConfig
+): String {
+    val paths = filePaths.map { it.trim() }.filter { it.isNotBlank() }
+    if (paths.isEmpty()) return "发送失败: 未选择文件"
+    if (paths.size == 1) {
+        return sendFileAutoOnIo(ctx, gson, identity, peer, paths.first(), config)
+    }
+
+    var successCount = 0
+    val failures = mutableListOf<String>()
+    paths.forEach { path ->
+        val status = sendFileAutoOnIo(ctx, gson, identity, peer, path, config)
+        if (status.contains("失败")) {
+            failures.add("${File(path).name}: $status")
+        } else {
+            successCount += 1
+        }
+    }
+    return if (failures.isEmpty()) {
+        "已发送 $successCount 个文件"
+    } else {
+        "已发送 $successCount/${paths.size} 个文件，失败 ${failures.size} 个: ${failures.joinToString("; ")}"
     }
 }
 

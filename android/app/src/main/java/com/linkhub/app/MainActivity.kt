@@ -1,6 +1,8 @@
 package com.linkhub.app
 
 import android.Manifest
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import android.os.Build
 import android.os.Handler
@@ -30,14 +32,26 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 class MainActivity : ComponentActivity() {
+    private val pendingShareUris = mutableStateOf<List<Uri>>(emptyList())
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestNotificationPermissionIfNeeded()
+        pendingShareUris.value = shareUrisFromIntent(intent)
         setContent {
             LinkHubTheme {
-                LinkHubMain()
+                LinkHubMain(
+                    sharedUris = pendingShareUris.value,
+                    onSharedUrisConsumed = { pendingShareUris.value = emptyList() }
+                )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingShareUris.value = shareUrisFromIntent(intent)
     }
 
     private fun requestNotificationPermissionIfNeeded() {
@@ -67,12 +81,21 @@ private data class PendingIncomingPeer(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun LinkHubMain() {
+fun LinkHubMain(
+    sharedUris: List<Uri> = emptyList(),
+    onSharedUrisConsumed: () -> Unit = {}
+) {
     val ctx = LocalContext.current
     val appCtx = ctx.applicationContext
     val mainHandler = remember { Handler(Looper.getMainLooper()) }
     var currentTab by remember { mutableStateOf(Tab.Pair) }
     var pendingIncomingPeer by remember { mutableStateOf<PendingIncomingPeer?>(null) }
+
+    LaunchedEffect(sharedUris) {
+        if (sharedUris.isNotEmpty()) {
+            currentTab = Tab.Send
+        }
+    }
 
     DisposableEffect(appCtx) {
         RustBridge.onIncomingPeerListener = { peer ->
@@ -171,7 +194,7 @@ fun LinkHubMain() {
             when (currentTab) {
                 Tab.Pair -> PairScreen()
                 Tab.Devices -> DevicesScreen()
-                Tab.Send -> SendScreen()
+                Tab.Send -> SendScreen(sharedUris, onSharedUrisConsumed)
                 Tab.History -> HistoryScreen()
                 Tab.Service -> ServiceScreen()
             }
@@ -213,6 +236,18 @@ fun LinkHubMain() {
                 }
             }
         )
+    }
+}
+
+@Suppress("DEPRECATION")
+private fun shareUrisFromIntent(intent: Intent?): List<Uri> {
+    if (intent == null) return emptyList()
+    return when (intent.action) {
+        Intent.ACTION_SEND -> listOfNotNull(intent.getParcelableExtra(Intent.EXTRA_STREAM))
+        Intent.ACTION_SEND_MULTIPLE -> {
+            intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.toList().orEmpty()
+        }
+        else -> emptyList()
     }
 }
 
