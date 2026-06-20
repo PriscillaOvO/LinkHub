@@ -29,3 +29,6 @@ Thumbs.db
 phone-*.png
 # AI handoff notes / worklog — local-only working notes, never committed
 docs/ai-handoff/
+
+# Local-dev cargo registry mirror (not for commit)
+core-rs/.cargo/

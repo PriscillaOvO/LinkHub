@@ -18,6 +18,8 @@ mod session;
 mod signaling_client;
 mod signaling_signed;
 mod signaling_supervisor;
+#[cfg(feature = "tor")]
+pub mod tor_transport;
 #[cfg(feature = "webrtc")]
 pub mod webrtc_session;
 #[cfg(feature = "webrtc")]
