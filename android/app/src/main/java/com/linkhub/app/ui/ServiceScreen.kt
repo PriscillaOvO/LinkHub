@@ -14,6 +14,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Divider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -54,6 +55,7 @@ fun ServiceScreen() {
     var webRtcRunning by remember { mutableStateOf(LinkHubService.isWebRtcReceiving) }
     var webRtcDetail by remember { mutableStateOf(LinkHubService.webRtcDetail) }
     var webRtcError by remember { mutableStateOf(LinkHubService.webRtcError) }
+    var advancedOpen by remember { mutableStateOf(false) }
     val gson = remember { Gson() }
     val listenPort = listenAddr.substringAfterLast(':', "8787").toIntOrNull() ?: 8787
     val networkHints = remember(listenPort) { localAndroidNetworkHints(listenPort) }
@@ -89,6 +91,11 @@ fun ServiceScreen() {
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 
+        OutlinedButton(onClick = { advancedOpen = !advancedOpen }, enabled = !isRunning) {
+            Text(if (advancedOpen) "收起高级设置" else "高级设置")
+        }
+
+        if (advancedOpen) {
         OutlinedTextField(
             value = listenAddr,
             onValueChange = { listenAddr = it },
@@ -104,6 +111,7 @@ fun ServiceScreen() {
         TextButton(onClick = { receiveDir = defaultReceiveDir(ctx) }) {
             Text("使用应用专属接收目录")
         }
+        }
 
         Divider()
         Text("跨网络接收 (WebRTC)", style = MaterialTheme.typography.titleSmall)
@@ -115,6 +123,7 @@ fun ServiceScreen() {
             )
             Text("随前台服务启动")
         }
+        if (advancedOpen) {
         OutlinedTextField(
             value = webRtcConfig.signalingUrl,
             onValueChange = { updateWebRtcConfig(webRtcConfig.copy(signalingUrl = it)) },
@@ -153,6 +162,7 @@ fun ServiceScreen() {
                 enabled = !isRunning
             )
             Text("仅使用 TURN 中继")
+        }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -205,12 +215,6 @@ fun ServiceScreen() {
             if (isRunning) "状态: 运行中 ($listenAddr)" else "状态: 已停止",
             style = MaterialTheme.typography.bodyMedium
         )
-        if (serviceStatus.receiveDir.isNotBlank()) {
-            Text("接收目录: ${serviceStatus.receiveDir}", style = MaterialTheme.typography.bodySmall)
-        }
-        if (serviceStatus.mdnsServiceName.isNotBlank()) {
-            Text("mDNS: ${serviceStatus.mdnsServiceName}", style = MaterialTheme.typography.bodySmall)
-        }
         Text(
             if (webRtcRunning) "跨网络: 接收中 (${webRtcConfig.signalingUrl})" else "跨网络: 未接收",
             style = MaterialTheme.typography.bodySmall
@@ -224,6 +228,13 @@ fun ServiceScreen() {
             )
         }
 
+        if (advancedOpen) {
+        if (serviceStatus.receiveDir.isNotBlank()) {
+            Text("接收目录: ${serviceStatus.receiveDir}", style = MaterialTheme.typography.bodySmall)
+        }
+        if (serviceStatus.mdnsServiceName.isNotBlank()) {
+            Text("mDNS: ${serviceStatus.mdnsServiceName}", style = MaterialTheme.typography.bodySmall)
+        }
         Divider()
         Text("本机地址提示", style = MaterialTheme.typography.titleSmall)
         if (networkHints.isEmpty()) {
@@ -236,6 +247,7 @@ fun ServiceScreen() {
             networkHints.forEach { hint ->
                 Text("${hint.interfaceName}: ${hint.address}", style = MaterialTheme.typography.bodySmall)
             }
+        }
         }
 
         if (statusMsg.isNotEmpty()) {

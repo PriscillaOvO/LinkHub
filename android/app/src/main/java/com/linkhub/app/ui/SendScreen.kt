@@ -66,6 +66,7 @@ fun SendScreen() {
     var loaded by remember { mutableStateOf(false) }
     var lastAutoAddr by remember { mutableStateOf("") }
     var webRtcConfig by remember { mutableStateOf(loadWebRtcConfig(ctx)) }
+    var advancedOpen by remember { mutableStateOf(false) }
     val gson = remember { Gson() }
 
     fun updateWebRtcConfig(next: AndroidWebRtcConfig) {
@@ -225,7 +226,11 @@ fun SendScreen() {
             }
 
             Divider()
+            OutlinedButton(onClick = { advancedOpen = !advancedOpen }) {
+                Text(if (advancedOpen) "收起高级设置" else "高级设置")
+            }
 
+            if (advancedOpen) {
             if (peers.isNotEmpty()) {
                 Text("选择可信设备", style = MaterialTheme.typography.titleSmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -412,6 +417,7 @@ fun SendScreen() {
                 enabled = selectedPeer != null && filePath.isNotEmpty() && !sending
             ) {
                 Text(if (sending) "跨网络发送中..." else "跨网络发送文件")
+            }
             }
         }
 
