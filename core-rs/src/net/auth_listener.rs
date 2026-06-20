@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::{LocalIdentity, TrustStore};
 
-use super::auth_session::run_authenticated_session;
+use super::auth_session::run_authenticated_session_with_accept;
 use super::RECEIVED_DIR;
 
 pub fn run_authenticated_text_listener(
@@ -117,8 +117,33 @@ pub fn run_authenticated_listener_on_with_callback(
     local_identity: LocalIdentity,
     trust_store: TrustStore,
     receive_dir: impl AsRef<Path>,
+    should_stop: impl FnMut() -> bool,
+    on_file_received: Option<FileReceivedCallback>,
+) -> io::Result<()> {
+    run_authenticated_listener_on_with_callbacks(
+        listener,
+        bind_label,
+        local_identity,
+        trust_store,
+        receive_dir,
+        should_stop,
+        on_file_received,
+        None,
+    )
+}
+
+/// Same as [`run_authenticated_listener_on_with_callback`] with an optional
+/// first-contact accept callback for AirDrop-style trust establishment.
+#[allow(clippy::too_many_arguments)]
+pub fn run_authenticated_listener_on_with_callbacks(
+    listener: TcpListener,
+    bind_label: &str,
+    local_identity: LocalIdentity,
+    trust_store: TrustStore,
+    receive_dir: impl AsRef<Path>,
     mut should_stop: impl FnMut() -> bool,
     on_file_received: Option<FileReceivedCallback>,
+    on_accept: Option<AcceptPeerCallback>,
 ) -> io::Result<()> {
     listener.set_nonblocking(true)?;
     let trust_store = Arc::new(trust_store);
@@ -140,15 +165,17 @@ pub fn run_authenticated_listener_on_with_callback(
                 let trust_store = Arc::clone(&trust_store);
                 let receive_dir = receive_dir.clone();
                 let on_file_received = on_file_received.clone();
+                let on_accept = on_accept.clone();
                 println!("Accepted authenticated peer connection from {peer_addr}");
 
                 thread::spawn(move || {
-                    if let Err(err) = run_authenticated_session(
+                    if let Err(err) = run_authenticated_session_with_accept(
                         stream,
                         local_identity,
                         trust_store,
                         receive_dir,
                         on_file_received,
+                        on_accept,
                     ) {
                         eprintln!("Authenticated peer session ended with error: {err}");
                     }

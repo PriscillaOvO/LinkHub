@@ -9,8 +9,8 @@ use jni::sys::jstring;
 use jni::{JNIEnv, JavaVM};
 
 use crate::{
-    FileReceivedCallback, LocalIdentity, PairingInvitation, PairingSession, ReceivedFileEvent,
-    TrustStore,
+    AcceptPeerCallback, FileReceivedCallback, IncomingPeer, LocalIdentity, PairingInvitation,
+    PairingSession, ReceivedFileEvent, TrustStore,
 };
 use serde::{Deserialize, Serialize};
 use std::net::TcpListener;
@@ -355,11 +355,18 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_webrtcReceiveFile(
         let bridge_class = env
             .find_class("com/linkhub/app/bridge/RustBridge")
             .map_err(|e| format!("failed to find RustBridge class: {e}"))?;
+        let accept_class_ref = env
+            .new_global_ref(&bridge_class)
+            .map_err(|e| format!("failed to pin RustBridge class: {e}"))?;
         let class_ref = env
             .new_global_ref(bridge_class)
             .map_err(|e| format!("failed to pin RustBridge class: {e}"))?;
         let on_file = make_file_received_callback(vm, class_ref);
-        webrtc_receive_file_impl(json, ts_path, url, ice_json, dir, on_file)
+        let accept_vm = env
+            .get_java_vm()
+            .map_err(|e| format!("failed to get JVM handle: {e}"))?;
+        let on_accept = make_accept_peer_callback(accept_vm, accept_class_ref);
+        webrtc_receive_file_impl(json, ts_path, url, ice_json, dir, on_file, on_accept)
     })();
     match result {
         Ok(s) => make_string(&mut env, &s),
@@ -405,6 +412,7 @@ fn webrtc_receive_file_impl(
     _ice_config_json: String,
     _receive_dir: String,
     _on_file: FileReceivedCallback,
+    _on_accept: AcceptPeerCallback,
 ) -> Result<String, String> {
     Err("cross-network WebRTC unavailable: build the .so with --features webrtc".into())
 }
@@ -448,6 +456,7 @@ fn webrtc_receive_file_impl(
     ice_config_json: String,
     receive_dir: String,
     on_file: FileReceivedCallback,
+    on_accept: AcceptPeerCallback,
 ) -> Result<String, String> {
     let jni: JniIdentity = serde_json::from_str(&identity_json).map_err(|e| format!("{e}"))?;
     let local = to_local_identity(&jni)?;
@@ -456,13 +465,14 @@ fn webrtc_receive_file_impl(
     let ice = parse_ice_config(&ice_config_json)?;
     let stop = android_webrtc_receiver_stop_flag();
     stop.store(false, Ordering::Relaxed);
-    crate::net::webrtc_session::receive_file_over_webrtc_until(
+    crate::net::webrtc_session::receive_file_over_webrtc_until_with_accept(
         &signaling_url,
         local,
         trust,
         &receive_dir,
         ice,
         Some(on_file),
+        Some(on_accept),
         stop,
     )
     .map_err(|e| format!("webrtc receive failed: {e}"))?;
@@ -647,6 +657,54 @@ fn make_file_received_callback(vm: JavaVM, class_ref: GlobalRef) -> FileReceived
     })
 }
 
+fn make_accept_peer_callback(vm: JavaVM, class_ref: GlobalRef) -> AcceptPeerCallback {
+    Arc::new(move |peer: IncomingPeer| -> bool {
+        let mut guard = match vm.attach_current_thread() {
+            Ok(guard) => guard,
+            Err(err) => {
+                eprintln!("onIncomingPeer: failed to attach JVM thread: {err}");
+                return false;
+            }
+        };
+        let env = &mut *guard;
+        let class = unsafe { JClass::from_raw(class_ref.as_raw()) };
+
+        let call = (|| -> Result<bool, jni::errors::Error> {
+            let device_id: JObject = env.new_string(&peer.device_id)?.into();
+            let device_name: JObject = env.new_string(&peer.device_name)?.into();
+            let public_key: JObject = env.new_string(&peer.public_key)?.into();
+            let dh_public_key: JObject = env.new_string(&peer.dh_public_key)?.into();
+            let fingerprint: JObject = env.new_string(&peer.fingerprint)?.into();
+            let accepted = env.call_static_method(
+                &class,
+                "onIncomingPeer",
+                "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)Z",
+                &[
+                    JValue::Object(&device_id),
+                    JValue::Object(&device_name),
+                    JValue::Object(&public_key),
+                    JValue::Object(&dh_public_key),
+                    JValue::Object(&fingerprint),
+                ],
+            )?;
+            accepted.z()
+        })();
+
+        let accepted = match call {
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("onIncomingPeer: JNI call failed: {err}");
+                false
+            }
+        };
+        if env.exception_check().unwrap_or(false) {
+            let _ = env.exception_clear();
+            return false;
+        }
+        accepted
+    })
+}
+
 #[no_mangle]
 pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_startListener(
     mut env: JNIEnv,
@@ -684,10 +742,17 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_startListener(
         let bridge_class = env
             .find_class("com/linkhub/app/bridge/RustBridge")
             .map_err(|e| format!("failed to find RustBridge class: {e}"))?;
+        let accept_class_ref = env
+            .new_global_ref(&bridge_class)
+            .map_err(|e| format!("failed to pin RustBridge class: {e}"))?;
         let class_ref = env
             .new_global_ref(bridge_class)
             .map_err(|e| format!("failed to pin RustBridge class: {e}"))?;
         let on_file_received = make_file_received_callback(vm, class_ref);
+        let accept_vm = env
+            .get_java_vm()
+            .map_err(|e| format!("failed to get JVM handle: {e}"))?;
+        let on_accept = make_accept_peer_callback(accept_vm, accept_class_ref);
 
         set_listener_last_error(None);
         // Claim a fresh generation for this run. The worker only clears the
@@ -704,7 +769,7 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_startListener(
             // is lost entirely; surfacing it through last_error makes it visible
             // via listenerStatus.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::run_authenticated_listener_on_with_callback(
+                crate::run_authenticated_listener_on_with_callbacks(
                     listener,
                     &addr,
                     local,
@@ -712,6 +777,7 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_startListener(
                     &dir,
                     || !LISTENER_RUNNING.load(Ordering::Relaxed),
                     Some(on_file_received),
+                    Some(on_accept),
                 )
             }));
             match outcome {

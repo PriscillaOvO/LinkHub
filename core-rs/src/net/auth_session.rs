@@ -32,12 +32,13 @@ use super::{
     AcceptPeerCallback, FileReceivedCallback, IncomingPeer, LocalDevice, ReceivedFileEvent,
 };
 
-pub(super) fn run_authenticated_session(
+pub(super) fn run_authenticated_session_with_accept(
     stream: TcpStream,
     local_identity: LocalIdentity,
     trust_store: Arc<TrustStore>,
     receive_dir: PathBuf,
     on_file_received: Option<FileReceivedCallback>,
+    on_accept: Option<AcceptPeerCallback>,
 ) -> io::Result<()> {
     let writer = stream.try_clone()?;
     let reader = BufReader::new(stream);
@@ -48,7 +49,7 @@ pub(super) fn run_authenticated_session(
         trust_store,
         receive_dir,
         on_file_received,
-        None,
+        on_accept,
     )
 }
 

@@ -33,14 +33,15 @@ pub use net::{
     attempt_with_fallback, open_sdp, plan_connection, preferred_established_route,
     run_authenticated_file_sender, run_authenticated_file_sender_over,
     run_authenticated_listener_on, run_authenticated_listener_on_with_callback,
-    run_authenticated_listener_until, run_authenticated_listener_with_receive_dir,
-    run_authenticated_responder_over, run_authenticated_text_listener,
-    run_authenticated_text_sender, run_authenticated_text_sender_over, run_connector,
-    run_connector_with_receive_dir, run_file_control_sender, run_file_sender, run_listener,
-    run_listener_with_receive_dir, run_text_sender, seal_sdp, verify_signaling_sdp, ConnectionPath,
-    ConnectionPlan, FileReceivedCallback, LocalDevice, PeerReachability, ReceivedFileEvent,
-    RetryPolicy, SignalingClient, SignalingDelivery, SignalingEvent, SignalingSupervisor,
-    SignalingSupervisorConfig, SignalingSupervisorEvent,
+    run_authenticated_listener_on_with_callbacks, run_authenticated_listener_until,
+    run_authenticated_listener_with_receive_dir, run_authenticated_responder_over,
+    run_authenticated_text_listener, run_authenticated_text_sender,
+    run_authenticated_text_sender_over, run_connector, run_connector_with_receive_dir,
+    run_file_control_sender, run_file_sender, run_listener, run_listener_with_receive_dir,
+    run_text_sender, seal_sdp, verify_signaling_sdp, AcceptPeerCallback, ConnectionPath,
+    ConnectionPlan, FileReceivedCallback, IncomingPeer, LocalDevice, PeerReachability,
+    ReceivedFileEvent, RetryPolicy, SignalingClient, SignalingDelivery, SignalingEvent,
+    SignalingSupervisor, SignalingSupervisorConfig, SignalingSupervisorEvent,
 };
 pub use presence::ConnectionState;
 pub use transport::{HeartbeatUpdate, TransportHealth, TransportKind};

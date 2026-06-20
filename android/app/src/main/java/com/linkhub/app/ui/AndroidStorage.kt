@@ -48,6 +48,31 @@ fun loadIdentity(ctx: Context): IdentityJson? {
 
 fun saveTrustedPeer(ctx: Context, deviceId: String, deviceName: String, fingerprint: String, payload: String) {
     val peer = trustedPeerFromPayload(deviceId, deviceName, fingerprint, payload) ?: return
+    saveTrustedPeer(ctx, peer)
+}
+
+fun saveTrustedPeerFromIncoming(
+    ctx: Context,
+    deviceId: String,
+    deviceName: String,
+    fingerprint: String,
+    publicKey: String,
+    dhPublicKey: String
+) {
+    if (deviceId.isBlank() || publicKey.isBlank() || dhPublicKey.isBlank()) return
+    saveTrustedPeer(
+        ctx,
+        TrustedPeer(
+            deviceId = deviceId,
+            deviceName = deviceName.ifBlank { deviceId },
+            fingerprint = fingerprint,
+            publicKey = publicKey,
+            dhPublicKey = dhPublicKey
+        )
+    )
+}
+
+private fun saveTrustedPeer(ctx: Context, peer: TrustedPeer) {
     val prefs = securePrefs(ctx)
     val list = loadTrustedPeers(ctx).toMutableList()
     list.removeAll { it.deviceId == peer.deviceId }

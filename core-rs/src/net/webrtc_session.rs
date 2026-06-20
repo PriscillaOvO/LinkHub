@@ -25,8 +25,9 @@ use crate::net::webrtc_transport::{
     accept_responder, connect_initiator, DataChannelDuplex, IceConfig, SdpSignal,
 };
 use crate::net::{
-    open_sdp, run_authenticated_file_sender_over, run_authenticated_responder_over, seal_sdp,
-    FileReceivedCallback, SignalingClient, SignalingDelivery, SignalingEvent,
+    open_sdp, run_authenticated_file_sender_over, run_authenticated_responder_over_with_accept,
+    seal_sdp, AcceptPeerCallback, FileReceivedCallback, SignalingClient, SignalingDelivery,
+    SignalingEvent,
 };
 use crate::{DeviceIdentity, LocalIdentity, TrustStore};
 
@@ -115,16 +116,43 @@ pub fn receive_file_over_webrtc_until(
     on_file: Option<FileReceivedCallback>,
     stop: Arc<AtomicBool>,
 ) -> io::Result<()> {
+    receive_file_over_webrtc_until_with_accept(
+        ws_url,
+        identity,
+        trust_store,
+        receive_dir,
+        ice,
+        on_file,
+        None,
+        stop,
+    )
+}
+
+/// Like [`receive_file_over_webrtc_until`] but allows first-contact peers to
+/// reach the authenticated responder, where `on_accept` decides user trust.
+#[allow(clippy::too_many_arguments)]
+pub fn receive_file_over_webrtc_until_with_accept(
+    ws_url: &str,
+    identity: LocalIdentity,
+    trust_store: Arc<TrustStore>,
+    receive_dir: impl AsRef<Path>,
+    ice: IceConfig,
+    on_file: Option<FileReceivedCallback>,
+    on_accept: Option<AcceptPeerCallback>,
+    stop: Arc<AtomicBool>,
+) -> io::Result<()> {
     let runtime = new_runtime()?;
     let handle = runtime.handle().clone();
     let (local_tx, local_rx) = unbounded_channel::<SdpSignal>();
     let (remote_tx, remote_rx) = unbounded_channel::<SdpSignal>();
+    let allow_first_contact = on_accept.is_some();
 
     let bridge = start_signaling_bridge(
         ws_url.to_string(),
         identity.clone(),
         SignalingRole::Responder {
             trust_store: Arc::clone(&trust_store),
+            allow_first_contact,
         },
         local_rx,
         remote_tx,
@@ -140,13 +168,14 @@ pub fn receive_file_over_webrtc_until(
 
     let writer = duplex.clone();
     let reader = BufReader::new(duplex.clone());
-    let result = run_authenticated_responder_over(
+    let result = run_authenticated_responder_over_with_accept(
         writer,
         reader,
         identity,
         trust_store,
         receive_dir,
         on_file,
+        on_accept,
     );
     duplex.close();
     result
@@ -159,6 +188,7 @@ enum SignalingRole {
     },
     Responder {
         trust_store: Arc<TrustStore>,
+        allow_first_contact: bool,
     },
 }
 
@@ -322,14 +352,28 @@ fn accept_signaling_delivery(
             peer_public_key_hex,
             ..
         } => delivery.kind == "answer" && delivery.from_public_key_hex == *peer_public_key_hex,
-        SignalingRole::Responder { trust_store } => {
+        SignalingRole::Responder {
+            trust_store,
+            allow_first_contact,
+        } => {
             if delivery.kind != "offer" {
                 return false;
             }
-            let Some(trusted) = trust_store.trusted_device(&delivery.from_device_id) else {
-                return false;
+            let trusted = trust_store.trusted_device(&delivery.from_device_id);
+            let accepted_sender = if let Some(trusted) = trusted {
+                trusted.identity().public_key() == delivery.from_public_key_hex
+            } else if *allow_first_contact {
+                let candidate = DeviceIdentity::new(
+                    delivery.from_device_id.clone(),
+                    "",
+                    delivery.from_public_key_hex.clone(),
+                    "",
+                );
+                candidate.has_consistent_device_id()
+            } else {
+                false
             };
-            if trusted.identity().public_key() != delivery.from_public_key_hex {
+            if !accepted_sender {
                 return false;
             }
             if active_session_id.is_none() {

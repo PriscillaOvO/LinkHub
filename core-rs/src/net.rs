@@ -37,9 +37,9 @@ use session::run_peer_session;
 
 pub use auth_listener::{
     run_authenticated_listener_on, run_authenticated_listener_on_with_callback,
-    run_authenticated_listener_until, run_authenticated_listener_with_receive_dir,
-    run_authenticated_text_listener, AcceptPeerCallback, FileReceivedCallback, IncomingPeer,
-    ReceivedFileEvent,
+    run_authenticated_listener_on_with_callbacks, run_authenticated_listener_until,
+    run_authenticated_listener_with_receive_dir, run_authenticated_text_listener,
+    AcceptPeerCallback, FileReceivedCallback, IncomingPeer, ReceivedFileEvent,
 };
 pub use connection_plan::{
     attempt_with_fallback, plan_connection, preferred_established_route, ConnectionPath,

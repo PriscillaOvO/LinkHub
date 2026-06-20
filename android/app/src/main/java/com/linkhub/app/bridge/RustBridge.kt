@@ -3,6 +3,14 @@ package com.linkhub.app.bridge
 object RustBridge {
     init { System.loadLibrary("linkhub_core") }
 
+    data class IncomingPeer(
+        val deviceId: String,
+        val deviceName: String,
+        val publicKey: String,
+        val dhPublicKey: String,
+        val fingerprint: String
+    )
+
     /**
      * Invoked from the native listener thread when an authenticated peer
      * finishes sending a file. Registered handler runs off the main thread.
@@ -16,6 +24,13 @@ object RustBridge {
         sizeBytes: Long
     ) -> Unit)? = null
 
+    /**
+     * Invoked from the native handshake thread for a cryptographically verified
+     * first-contact peer. The handler must block until the user accepts/rejects.
+     */
+    @Volatile
+    var onIncomingPeerListener: ((IncomingPeer) -> Boolean)? = null
+
     @JvmStatic
     fun onFileReceived(
         peerDeviceId: String,
@@ -28,6 +43,29 @@ object RustBridge {
             onFileReceivedListener?.invoke(peerDeviceId, peerDeviceName, fileName, filePath, sizeBytes)
         } catch (_: Throwable) {
             // Never let an exception cross back into native code.
+        }
+    }
+
+    @JvmStatic
+    fun onIncomingPeer(
+        deviceId: String,
+        deviceName: String,
+        publicKey: String,
+        dhPublicKey: String,
+        fingerprint: String
+    ): Boolean {
+        return try {
+            onIncomingPeerListener?.invoke(
+                IncomingPeer(
+                    deviceId = deviceId,
+                    deviceName = deviceName,
+                    publicKey = publicKey,
+                    dhPublicKey = dhPublicKey,
+                    fingerprint = fingerprint
+                )
+            ) == true
+        } catch (_: Throwable) {
+            false
         }
     }
 
