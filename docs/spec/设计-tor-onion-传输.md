@@ -109,4 +109,27 @@ onion**(非典型场景,Arti/Tor 对此本就别扭);(2) 只有 1–2 个可用 
 **因此 onion-over-Tor 的端到端字节路径,需要在以下任一条件下再确认一次**:换非审查出口网络 / 更多更健康的
 网桥 / 两台真实设备。**集成代码路径无问题,卡的是国内审查网络 + 少量网桥下 HS 电路的现实可行性。**
 
-- **未做(留给 Phase 2)**:onion 字节回环在上述更现实条件下的一次性确认。
+- **未做(留给后续)**:onion 字节回环在上述更现实条件下的一次性确认。
+
+## Phase 2/3 实现状态（2026-06-21,已落地）
+
+Tor 传输已真正接进项目(不再只是探雷),仍 opt-in、默认不拉 Arti。
+
+- **Phase 2(commit `5cad6c4`)** `core-rs/src/net/tor_transport.rs`(`tor` feature):
+  - `OnionStreamDuplex`——把 Arti 异步 onion `DataStream` 桥成同步 `Read+Write`(镜像 webrtc 的 `DataChannelDuplex`),
+    现有 Noise KK 会话原样跑在其上。
+  - `TorContext::{bootstrap(可选 BridgeSettings), connect_onion, host_onion}` + `OnionListener`。
+    host 用 `launch_onion_service_with_hsid`(+`experimental-api`)在**身份派生地址**上起服务(`HsIdKeypair`
+    由同一 hs 种子构造,地址 == `LocalIdentity::onion_address`)。需 `rusqlite/bundled` + rustls ring provider。
+  - 验证:默认矩阵保持无 Arti;`cargo ndk --features tor check` 在项目里双 ABI 交叉编译通过。
+- **Phase 3(commit `8008468`)** 接线 + CLI:
+  - `TransportKind::Onion`(评分 500,LAN/WebRTC 之下、relay 之上)、`ConnectionPath::Onion{addr}` +
+    `PeerReachability.onion_addr`,`plan_connection` 顺序 LAN→WebRTC→Onion→relay;onion 路由记为 Degraded(能传但慢)。
+  - `LocalIdentity::onion_hs_seed()`(host 用)。
+  - CLI `listen-tor` / `connect-tor`(`tor` feature;可选 `--bridge`/`--pt-binary`/`--pt-protocol`)——
+    bootstrap Arti、host/拨 onion、跑现有 Noise KK 传文件。**仅已配对**(trust-store 鉴权);对端 .onion 作参数传入
+    (无法由公钥反推,须由设备传给 peer)。
+  - 验证:默认 fmt/test(151)/clippy + 默认双 ABI ndk 绿(`.so` 精简);`--features tor` 构建+clippy 干净;桌面 check/test(14) 绿。
+- **构建 `--features tor` 的本地镜像**:`core-rs/.cargo/config.toml`(USTC 源替换,复用 spike 缓存的 Arti 树)——
+  **本地用、不入 git**(已 gitignore)。Cargo.lock 仍是 crates.io 源,不影响他人复现。
+- **Phase 4/5 仍未做(门控真机 onion 验证)**:Phase 4 桌面+Android 壳(移动端自动 Onion 兜底限前台);Phase 5 文档收口。
