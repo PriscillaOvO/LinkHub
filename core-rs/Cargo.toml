@@ -36,6 +36,10 @@ rand_core = { version = "0.6.4", features = ["getrandom"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10.8"
+# SHA3-256 for the v3 onion-address checksum (Tor rend-spec-v3 §6). Small,
+# pure-Rust, cross-compiles cleanly — kept in the default build so onion
+# addresses can be derived without the (feature-gated) Tor transport.
+sha3 = "0.10.8"
 snow = "0.9.6"
 # Sync WebSocket client for the signaling server (M2-step2). default-features
 # off keeps it TLS-free (ws:// only) and pure-Rust so it cross-compiles to Android.

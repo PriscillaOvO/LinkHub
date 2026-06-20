@@ -12,6 +12,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand_core::OsRng;
 use x25519_dalek::{PublicKey as DhPublicKey, StaticSecret as DhStaticSecret};
 
+use super::onion::{derive_onion_hs_seed, onion_address_v3};
 use super::secure_store::{
     format_secure_local_identity_file, parse_secure_local_identity_file,
     protect_local_identity_bytes, unprotect_local_identity_bytes,
@@ -186,6 +187,21 @@ impl LocalIdentity {
 
     pub fn static_dh_key_bytes(&self) -> Result<[u8; 32], String> {
         hex_array::<32>(&self.static_dh_key_hex)
+    }
+
+    /// This device's stable v3 onion (`.onion`) address, derived deterministically
+    /// from its Ed25519 signing key (via a domain-separated hidden-service key, so
+    /// the signing key itself is never reused). Lets an already-paired peer
+    /// reconnect over Tor with no signaling server: the address is shared in the
+    /// identity exchange and stored in the peer's trust store. The matching
+    /// hidden-service secret (needed to *host* the service) is derived from the
+    /// same seed by the Tor transport (feature-gated); this returns only the
+    /// public address, so it stays in the default build.
+    pub fn onion_address(&self) -> Result<String, String> {
+        let signing_key_seed = hex_array::<32>(&self.signing_key_hex)?;
+        let hs_seed = derive_onion_hs_seed(&signing_key_seed);
+        let hs_public_key = SigningKey::from_bytes(&hs_seed).verifying_key().to_bytes();
+        Ok(onion_address_v3(&hs_public_key))
     }
 
     pub fn created_at(&self) -> SystemTime {
@@ -496,5 +512,33 @@ mod first_contact_binding_tests {
             alice.dh_public_key(),
         );
         assert!(!forged.has_consistent_device_id());
+    }
+}
+
+#[cfg(test)]
+mod onion_address_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn onion_address_is_stable_and_well_formed() {
+        let created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(7);
+        let identity = LocalIdentity::from_keys("PC", [7u8; 32], [0u8; 32], created_at);
+
+        let address = identity.onion_address().unwrap();
+        // Same identity always yields the same address (carried + stored once).
+        let rebuilt = LocalIdentity::from_keys("PC", [7u8; 32], [0u8; 32], created_at);
+        assert_eq!(address, rebuilt.onion_address().unwrap());
+
+        assert!(address.ends_with(".onion"));
+        assert_eq!(address.trim_end_matches(".onion").len(), 56);
+    }
+
+    #[test]
+    fn onion_address_differs_for_different_signing_keys() {
+        let now = SystemTime::UNIX_EPOCH;
+        let a = LocalIdentity::from_keys("PC", [7u8; 32], [0u8; 32], now);
+        let b = LocalIdentity::from_keys("PC", [9u8; 32], [0u8; 32], now);
+        assert_ne!(a.onion_address().unwrap(), b.onion_address().unwrap());
     }
 }

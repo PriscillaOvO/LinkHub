@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod device_identity;
+mod onion;
 mod pairing;
 mod secure_store;
 mod trust_store;
