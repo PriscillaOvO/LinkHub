@@ -129,7 +129,7 @@ fn endpoints_from_resolved_service(
 }
 
 fn txt_records_from_resolved(info: &ResolvedService) -> Vec<String> {
-    ["lh", "id", "name", "fp", "port"]
+    ["lh", "id", "name", "fp", "port", "pk", "dh", "sig"]
         .into_iter()
         .filter_map(|key| {
             info.get_property_val_str(key)
@@ -155,6 +155,11 @@ fn endpoint_with_srv_port(
         advertisement.device_name().to_string(),
         (ip, port).into(),
         discovered_at,
+    )
+    .with_identity_binding(
+        advertisement.public_key().to_string(),
+        advertisement.dh_public_key().to_string(),
+        advertisement.binding_sig().to_string(),
     )
 }
 
@@ -192,6 +197,14 @@ mod tests {
             Some("3C5E-00FB-7731-6134")
         );
         assert_eq!(service_info.get_property_val_str("port"), Some("8787"));
+        assert_eq!(
+            service_info.get_property_val_str("pk"),
+            Some("phone-public-key")
+        );
+        assert_eq!(
+            service_info.get_property_val_str("dh"),
+            Some("0000000000000000000000000000000000000000000000000000000000000000")
+        );
     }
 
     #[test]
@@ -210,6 +223,7 @@ mod tests {
 
         assert_eq!(endpoint.addr(), ([127, 0, 0, 1], 9000).into());
         assert_eq!(endpoint.device_id(), "phone-001");
+        assert_eq!(endpoint.public_key(), "phone-public-key");
         assert_eq!(endpoint.discovered_at(), now);
     }
 }

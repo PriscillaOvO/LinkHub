@@ -99,6 +99,50 @@ function showMessage(containerId, text, type) {
   setTimeout(() => div.remove(), 6000);
 }
 
+// ── Incoming first-contact prompt ──────────────────────────────────
+// Rust blocks the authenticated handshake while this prompt is pending. The
+// polling fallback works in both dev and packaged builds without a JS bundler.
+
+let activeIncomingPeerRequestId = null;
+let incomingPeerPromptTimer = null;
+
+async function handleIncomingPeerPrompt(peer) {
+  if (!peer || activeIncomingPeerRequestId === peer.request_id) return;
+  activeIncomingPeerRequestId = peer.request_id;
+  const accepted = window.confirm(
+    `接受来自 ${peer.device_name} 的传输？\n\n设备 ID：${peer.device_id}\n指纹：${peer.fingerprint}`
+  );
+
+  try {
+    await tauriInvoke('respond_incoming_peer', {
+      requestId: peer.request_id,
+      accept: accepted,
+      trustStorePath: getSetting('trustStorePath')
+    });
+    setStatus(accepted ? '已接受附近设备' : '已拒绝附近设备', accepted ? 'ok' : 'info');
+    if (accepted && typeof renderDevicesTab === 'function') renderDevicesTab();
+  } catch (err) {
+    setStatus('处理接收请求失败：' + err.message, 'error');
+  } finally {
+    activeIncomingPeerRequestId = null;
+  }
+}
+
+async function pollIncomingPeerPrompt() {
+  try {
+    const peer = await tauriInvoke('pending_incoming_peer');
+    if (peer) await handleIncomingPeerPrompt(peer);
+  } catch (_) {
+    // Command is unavailable outside Tauri; stay silent in browser previews.
+  }
+}
+
+function startIncomingPeerPromptWatcher() {
+  if (incomingPeerPromptTimer) return;
+  pollIncomingPeerPrompt();
+  incomingPeerPromptTimer = setInterval(pollIncomingPeerPrompt, 1000);
+}
+
 // ── Auto-discovery (background mDNS refresh) ────────────────────────
 // Periodically resolves trusted devices' LAN addresses so the Devices and
 // Send tabs stay current without the user pressing "Scan LAN". Reuses the
@@ -196,5 +240,6 @@ async function seedDefaultPaths() {
 
 window.addEventListener('DOMContentLoaded', async () => {
   await seedDefaultPaths();
+  startIncomingPeerPromptWatcher();
   startAutoDiscovery();
 });

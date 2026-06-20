@@ -2,20 +2,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use linkhub_core::{
-    plan_connection, ConnectionPath, DiscoveryEndpoint, LocalIdentity, MdnsAdvertisement,
-    MdnsRegistration, MdnsRuntime, PairingInvitation, PairingSession, PeerReachability, TrustStore,
+    plan_connection, AcceptPeerCallback, ConnectionPath, DeviceIdentity, DiscoveryEndpoint,
+    IncomingPeer, LocalIdentity, MdnsAdvertisement, MdnsRegistration, MdnsRuntime,
+    PairingInvitation, PairingSession, PeerReachability, TrustStore, TrustedDevice,
 };
 use qrcode::render::svg;
 use qrcode::QrCode;
 use serde::{Deserialize, Serialize};
 use std::net::{TcpListener, UdpSocket};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
 /// Global listener state shared across commands.
@@ -81,6 +82,21 @@ fn mdns_advertise_state() -> &'static Mutex<Option<MdnsAdvertiseHandle>> {
     STATE.get_or_init(|| Mutex::new(None))
 }
 
+struct IncomingPeerPending {
+    payload: IncomingPeerPromptPayload,
+    responder: mpsc::Sender<bool>,
+}
+
+fn incoming_peer_pending() -> &'static Mutex<Option<IncomingPeerPending>> {
+    static STATE: OnceLock<Mutex<Option<IncomingPeerPending>>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(None))
+}
+
+fn next_incoming_peer_request_id() -> u64 {
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+    NEXT_ID.fetch_add(1, Ordering::Relaxed)
+}
+
 // ── Response types ─────────────────────────────────────────────────
 
 #[derive(Clone, Serialize)]
@@ -113,6 +129,21 @@ struct DiscoveredPeer {
     device_id: String,
     device_name: String,
     address: String,
+    fingerprint: String,
+    public_key: String,
+    dh_public_key: String,
+    binding_sig: String,
+    trusted: bool,
+}
+
+#[derive(Clone, Serialize)]
+struct IncomingPeerPromptPayload {
+    request_id: u64,
+    device_id: String,
+    device_name: String,
+    public_key: String,
+    dh_public_key: String,
+    fingerprint: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -253,6 +284,125 @@ fn load_identity(path: &str) -> Result<LocalIdentity, String> {
         None => LocalIdentity::load_from_path(path)
             .map_err(|err| format!("failed to load identity: {err}")),
     }
+}
+
+fn prompt_payload_from_peer(request_id: u64, peer: &IncomingPeer) -> IncomingPeerPromptPayload {
+    IncomingPeerPromptPayload {
+        request_id,
+        device_id: peer.device_id.clone(),
+        device_name: peer.device_name.clone(),
+        public_key: peer.public_key.clone(),
+        dh_public_key: peer.dh_public_key.clone(),
+        fingerprint: peer.fingerprint.clone(),
+    }
+}
+
+fn identity_from_prompt_payload(payload: &IncomingPeerPromptPayload) -> DeviceIdentity {
+    DeviceIdentity::new(
+        payload.device_id.clone(),
+        payload.device_name.clone(),
+        payload.public_key.clone(),
+        payload.dh_public_key.clone(),
+    )
+}
+
+fn trust_incoming_peer(
+    payload: &IncomingPeerPromptPayload,
+    trust_store_path: &str,
+) -> Result<(), String> {
+    let identity = identity_from_prompt_payload(payload);
+    if !identity.has_consistent_device_id() {
+        return Err("incoming peer identity has inconsistent device_id".to_string());
+    }
+
+    let mut store = TrustStore::load_from_path(trust_store_path)
+        .map_err(|e| format!("failed to load trust store: {e}"))?;
+    store.trust(TrustedDevice::new(identity, SystemTime::now()));
+    store
+        .save_to_path(trust_store_path)
+        .map_err(|e| format!("failed to save trust store: {e}"))
+}
+
+fn make_desktop_accept_callback(
+    app: tauri::AppHandle,
+    trust_store_path: String,
+) -> AcceptPeerCallback {
+    Arc::new(move |peer: IncomingPeer| {
+        let request_id = next_incoming_peer_request_id();
+        let payload = prompt_payload_from_peer(request_id, &peer);
+        let (tx, rx) = mpsc::channel();
+
+        {
+            let mut pending = incoming_peer_pending().lock().unwrap();
+            if pending.is_some() {
+                return false;
+            }
+            *pending = Some(IncomingPeerPending {
+                payload: payload.clone(),
+                responder: tx,
+            });
+        }
+
+        focus_main_window(&app);
+        let _ = app.emit("incoming-peer", payload.clone());
+        let accepted = rx.recv_timeout(Duration::from_secs(120)).unwrap_or(false);
+
+        let mut pending = incoming_peer_pending().lock().unwrap();
+        let should_clear = pending
+            .as_ref()
+            .map(|pending| pending.payload.request_id == request_id)
+            .unwrap_or(false);
+        if should_clear {
+            *pending = None;
+        }
+
+        if accepted {
+            TrustStore::load_from_path(&trust_store_path)
+                .map(|store| store.is_trusted(&payload.device_id))
+                .unwrap_or(false)
+        } else {
+            false
+        }
+    })
+}
+
+#[tauri::command]
+fn pending_incoming_peer() -> Option<IncomingPeerPromptPayload> {
+    incoming_peer_pending()
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|pending| pending.payload.clone())
+}
+
+#[tauri::command]
+fn respond_incoming_peer(
+    request_id: u64,
+    accept: bool,
+    trust_store_path: String,
+) -> Result<(), String> {
+    let pending = {
+        let mut guard = incoming_peer_pending().lock().unwrap();
+        match guard.as_ref() {
+            Some(pending) if pending.payload.request_id == request_id => guard.take(),
+            Some(_) => return Err("incoming peer request is no longer current".to_string()),
+            None => return Ok(()),
+        }
+    };
+
+    let Some(pending) = pending else {
+        return Ok(());
+    };
+
+    if accept {
+        if let Err(err) = trust_incoming_peer(&pending.payload, &trust_store_path) {
+            let _ = pending.responder.send(false);
+            return Err(err);
+        }
+    }
+
+    let _ = pending.responder.send(accept);
+    Ok(())
 }
 
 // ── Default paths (cross-platform) ─────────────────────────────────
@@ -439,16 +589,16 @@ fn trusted_discovered_peers(
     store: &TrustStore,
     endpoints: Vec<DiscoveryEndpoint>,
 ) -> Vec<DiscoveredPeer> {
+    discovered_peers(store, endpoints)
+        .into_iter()
+        .filter(|peer| peer.trusted)
+        .collect()
+}
+
+fn discovered_peers(store: &TrustStore, endpoints: Vec<DiscoveryEndpoint>) -> Vec<DiscoveredPeer> {
     let mut peers = endpoints
         .into_iter()
-        .filter_map(|endpoint| {
-            store.trusted_device(endpoint.device_id())?;
-            Some(DiscoveredPeer {
-                device_id: endpoint.device_id().to_string(),
-                device_name: endpoint.device_name().to_string(),
-                address: endpoint.addr().to_string(),
-            })
-        })
+        .filter_map(|endpoint| discovered_peer_from_endpoint(store, endpoint))
         .collect::<Vec<_>>();
     peers.sort_by(|left, right| {
         left.device_name
@@ -459,6 +609,91 @@ fn trusted_discovered_peers(
     peers
         .dedup_by(|left, right| left.device_id == right.device_id && left.address == right.address);
     peers
+}
+
+fn discovered_peer_from_endpoint(
+    store: &TrustStore,
+    endpoint: DiscoveryEndpoint,
+) -> Option<DiscoveredPeer> {
+    if let Some(trusted) = store.trusted_device(endpoint.device_id()) {
+        let identity = trusted.identity();
+        return Some(DiscoveredPeer {
+            device_id: identity.device_id().to_string(),
+            device_name: identity.device_name().to_string(),
+            address: endpoint.addr().to_string(),
+            fingerprint: identity.fingerprint(),
+            public_key: identity.public_key().to_string(),
+            dh_public_key: identity.dh_public_key().to_string(),
+            binding_sig: endpoint.binding_sig().to_string(),
+            trusted: true,
+        });
+    }
+
+    let identity = verified_endpoint_identity(&endpoint)?;
+    Some(DiscoveredPeer {
+        device_id: identity.device_id().to_string(),
+        device_name: identity.device_name().to_string(),
+        address: endpoint.addr().to_string(),
+        fingerprint: identity.fingerprint(),
+        public_key: identity.public_key().to_string(),
+        dh_public_key: identity.dh_public_key().to_string(),
+        binding_sig: endpoint.binding_sig().to_string(),
+        trusted: false,
+    })
+}
+
+fn verified_endpoint_identity(endpoint: &DiscoveryEndpoint) -> Option<DeviceIdentity> {
+    if endpoint.public_key().trim().is_empty()
+        || endpoint.dh_public_key().trim().is_empty()
+        || endpoint.binding_sig().trim().is_empty()
+    {
+        return None;
+    }
+
+    let identity = DeviceIdentity::new(
+        endpoint.device_id().to_string(),
+        endpoint.device_name().to_string(),
+        endpoint.public_key().to_string(),
+        endpoint.dh_public_key().to_string(),
+    );
+    if !identity.has_consistent_device_id() {
+        return None;
+    }
+    if !identity
+        .verify_identity_binding(endpoint.binding_sig())
+        .ok()?
+    {
+        return None;
+    }
+    Some(identity)
+}
+
+fn verified_identity_from_fields(
+    peer_device_id: &str,
+    peer_device_name: &str,
+    peer_public_key: &str,
+    peer_dh_public_key: &str,
+    binding_sig: &str,
+) -> Result<DeviceIdentity, String> {
+    let identity = DeviceIdentity::new(
+        peer_device_id.to_string(),
+        peer_device_name.to_string(),
+        peer_public_key.to_string(),
+        peer_dh_public_key.to_string(),
+    );
+    if !identity.has_consistent_device_id() {
+        return Err("discovered peer identity has inconsistent device_id".to_string());
+    }
+    if binding_sig.trim().is_empty() {
+        return Err("discovered peer is missing identity binding signature".to_string());
+    }
+    let verified = identity
+        .verify_identity_binding(binding_sig)
+        .map_err(|err| format!("invalid discovered peer identity binding: {err}"))?;
+    if !verified {
+        return Err("discovered peer identity binding did not verify".to_string());
+    }
+    Ok(identity)
 }
 
 #[tauri::command]
@@ -475,6 +710,22 @@ async fn scan_trusted_mdns(
         .map_err(|e| format!("mDNS scan failed: {e}"))?;
     let _ = runtime.shutdown();
     Ok(trusted_discovered_peers(&store, endpoints))
+}
+
+#[tauri::command]
+async fn scan_mdns(
+    trust_store_path: String,
+    timeout_seconds: u64,
+) -> Result<Vec<DiscoveredPeer>, String> {
+    let timeout = timeout_seconds.clamp(1, 15);
+    let store = TrustStore::load_from_path(&trust_store_path)
+        .map_err(|e| format!("failed to load trust store: {e}"))?;
+    let runtime = MdnsRuntime::new().map_err(|e| format!("failed to start mDNS scanner: {e}"))?;
+    let endpoints = runtime
+        .browse_for(Duration::from_secs(timeout))
+        .map_err(|e| format!("mDNS scan failed: {e}"))?;
+    let _ = runtime.shutdown();
+    Ok(discovered_peers(&store, endpoints))
 }
 
 // ── Send commands ──────────────────────────────────────────────────
@@ -605,6 +856,85 @@ async fn send_encrypted_file(
         &history_path,
         &peer_device_id,
         peer.device_name(),
+        "file",
+        fname,
+        "success",
+    );
+
+    Ok(SendResult {
+        success: true,
+        message_id: String::new(),
+        detail: "文件已发送并确认".to_string(),
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn send_file_to_discovered(
+    peer_addr: String,
+    identity_path: String,
+    peer_device_id: String,
+    peer_device_name: String,
+    peer_public_key: String,
+    peer_dh_public_key: String,
+    binding_sig: String,
+    trust_store_path: String,
+    history_path: String,
+    file_path: String,
+) -> Result<SendResult, String> {
+    let identity = load_identity(&identity_path)?;
+    let peer_identity = if binding_sig.trim().is_empty() {
+        let store = TrustStore::load_from_path(&trust_store_path)
+            .map_err(|e| format!("failed to load trust store: {e}"))?;
+        store
+            .trusted_device(&peer_device_id)
+            .map(|device| device.identity().clone())
+            .ok_or_else(|| {
+                format!("discovered peer '{peer_device_id}' is not trusted and has no signature")
+            })?
+    } else {
+        verified_identity_from_fields(
+            &peer_device_id,
+            &peer_device_name,
+            &peer_public_key,
+            &peer_dh_public_key,
+            &binding_sig,
+        )?
+    };
+    let dh_bytes = linkhub_core::decode_hex(peer_identity.dh_public_key())
+        .map_err(|e| format!("invalid discovered peer dh key: {e}"))?;
+    let dh_bytes: [u8; 32] = dh_bytes
+        .try_into()
+        .map_err(|_| "discovered peer dh key must be 32 bytes".to_string())?;
+    let fname = std::path::Path::new(&file_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(&file_path)
+        .to_string();
+
+    if let Err(err) = linkhub_core::run_authenticated_file_sender(
+        &peer_addr,
+        identity,
+        peer_identity.device_id(),
+        &dh_bytes,
+        &file_path,
+    ) {
+        let detail = format!("failed: {err}");
+        append_send_history(
+            &history_path,
+            peer_identity.device_id(),
+            peer_identity.device_name(),
+            "file",
+            fname,
+            &detail,
+        );
+        return Err(format!("send failed: {err}"));
+    }
+
+    append_send_history(
+        &history_path,
+        peer_identity.device_id(),
+        peer_identity.device_name(),
         "file",
         fname,
         "success",
@@ -786,6 +1116,7 @@ async fn webrtc_send_file(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn webrtc_receive_file(
+    _app: tauri::AppHandle,
     _signaling_url: String,
     _identity_path: String,
     _trust_store_path: String,
@@ -802,6 +1133,7 @@ async fn webrtc_receive_file(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn webrtc_receive_file(
+    app: tauri::AppHandle,
     signaling_url: String,
     identity_path: String,
     trust_store_path: String,
@@ -817,15 +1149,19 @@ async fn webrtc_receive_file(
             .map_err(|e| format!("failed to load trust store: {e}"))?,
     );
     let ice = build_ice_config(ice_urls, turn_username, turn_credential, relay_only);
+    let on_accept = make_desktop_accept_callback(app, trust_store_path);
+    let stop = Arc::new(AtomicBool::new(false));
 
     let received = tauri::async_runtime::spawn_blocking(move || {
-        linkhub_core::net::webrtc_session::receive_file_over_webrtc(
+        linkhub_core::net::webrtc_session::receive_file_over_webrtc_until_with_accept(
             &signaling_url,
             identity,
             trust_store,
             &receive_dir,
             ice,
             None,
+            Some(on_accept),
+            stop,
         )
     })
     .await
@@ -859,6 +1195,7 @@ fn webrtc_receiver_status() -> WebRtcReceiverStatus {
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn webrtc_start_receiver(
+    _app: tauri::AppHandle,
     _signaling_url: String,
     _identity_path: String,
     _trust_store_path: String,
@@ -875,6 +1212,7 @@ async fn webrtc_start_receiver(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn webrtc_start_receiver(
+    app: tauri::AppHandle,
     signaling_url: String,
     identity_path: String,
     trust_store_path: String,
@@ -896,6 +1234,7 @@ async fn webrtc_start_receiver(
             .map_err(|e| format!("failed to load trust store: {e}"))?,
     );
     let ice = build_ice_config(ice_urls, turn_username, turn_credential, relay_only);
+    let on_accept = make_desktop_accept_callback(app, trust_store_path);
     let stop = Arc::new(AtomicBool::new(false));
 
     state.running.store(true, Ordering::Relaxed);
@@ -906,15 +1245,17 @@ async fn webrtc_start_receiver(
 
     let handle = std::thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
-            let result = linkhub_core::net::webrtc_session::receive_file_over_webrtc_until(
-                &signaling_url,
-                identity.clone(),
-                Arc::clone(&trust_store),
-                &receive_dir,
-                ice.clone(),
-                None,
-                Arc::clone(&stop),
-            );
+            let result =
+                linkhub_core::net::webrtc_session::receive_file_over_webrtc_until_with_accept(
+                    &signaling_url,
+                    identity.clone(),
+                    Arc::clone(&trust_store),
+                    &receive_dir,
+                    ice.clone(),
+                    None,
+                    Some(on_accept.clone()),
+                    Arc::clone(&stop),
+                );
 
             if stop.load(Ordering::Relaxed) {
                 break;
@@ -1042,6 +1383,7 @@ fn local_network_hints(port: u16) -> Vec<NetworkHint> {
 
 #[tauri::command]
 fn start_listener(
+    app: tauri::AppHandle,
     bind_addr: String,
     identity_path: String,
     trust_store_path: String,
@@ -1064,15 +1406,18 @@ fn start_listener(
 
     let addr = bind_addr.clone();
     let receive_dir = receive_dir.clone();
+    let on_accept = make_desktop_accept_callback(app, trust_store_path);
 
     let handle = std::thread::spawn(move || {
-        if let Err(err) = linkhub_core::run_authenticated_listener_on(
+        if let Err(err) = linkhub_core::run_authenticated_listener_on_with_callbacks(
             listener,
             &addr,
             identity,
             trust_store,
             &receive_dir,
             || !listener_state().running.load(Ordering::Relaxed),
+            None,
+            Some(on_accept),
         ) {
             let err = err.to_string();
             *listener_state().last_error.lock().unwrap() = err.clone();
@@ -1101,7 +1446,7 @@ fn start_mdns_advertise(identity_path: String, port: u16) -> Result<MdnsAdvertis
     }
 
     let identity = load_identity(&identity_path)?;
-    let advertisement = MdnsAdvertisement::from_identity(identity.identity(), port);
+    let advertisement = MdnsAdvertisement::from_local_identity(&identity, port);
     let runtime =
         MdnsRuntime::new().map_err(|e| format!("failed to start mDNS advertiser: {e}"))?;
     let registration = runtime
@@ -1235,10 +1580,13 @@ fn main() {
             identity_init,
             identity_load,
             get_local_status,
+            pending_incoming_peer,
+            respond_incoming_peer,
             choose_file_path,
             choose_folder_path,
             send_encrypted_text,
             send_encrypted_file,
+            send_file_to_discovered,
             connection_plan,
             webrtc_send_file,
             webrtc_receive_file,
@@ -1251,6 +1599,7 @@ fn main() {
             stop_listener,
             listener_status,
             local_network_hints,
+            scan_mdns,
             scan_trusted_mdns,
             start_mdns_advertise,
             stop_mdns_advertise,
@@ -1498,5 +1847,22 @@ mod tests {
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].device_id, "trusted-001");
         assert_eq!(peers[0].address, "192.168.1.20:8787");
+    }
+
+    #[test]
+    fn smoke_discovered_peers_include_signed_first_contact_devices() {
+        let identity = LocalIdentity::generate("Nearby PC", SystemTime::now());
+        let now = Instant::now();
+        let endpoint = MdnsAdvertisement::from_local_identity(&identity, 8787)
+            .to_endpoint([192, 168, 1, 40].into(), now);
+
+        let peers = discovered_peers(&TrustStore::default(), vec![endpoint]);
+
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].device_id, identity.device_id());
+        assert_eq!(peers[0].device_name, "Nearby PC");
+        assert_eq!(peers[0].address, "192.168.1.40:8787");
+        assert!(!peers[0].trusted);
+        assert!(!peers[0].binding_sig.is_empty());
     }
 }

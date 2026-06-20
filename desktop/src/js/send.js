@@ -1,6 +1,7 @@
 // ── Send Tab ────────────────────────────────────────────────────────
 
 let cachedPeers = [];
+let cachedNearbyPeers = [];
 let pendingSendSelection = null;
 let webrtcReceiverPoll = null;
 // Tracks the last address auto-filled per kind, so background discovery can
@@ -10,6 +11,21 @@ let lastAutoAddr = { text: '', file: '' };
 function buildSendTab() {
   const section = document.getElementById('tab-send');
   section.innerHTML = `
+    <div class="card">
+      <h3>附近设备</h3>
+      <div class="form-group">
+        <label>待发送文件</label>
+        <div class="inline-row">
+          <input type="text" id="nearby-file-path" placeholder="C:\\path\\to\\file.txt">
+          <button class="btn btn-secondary" data-act="chooseNearbyFileForSend">浏览…</button>
+          <button class="btn btn-secondary" data-act="refreshNearbyPeers">刷新</button>
+        </div>
+      </div>
+      <ul class="device-list" id="nearby-peer-list">
+        <li class="device-item"><span class="device-meta">正在扫描附近设备…</span></li>
+      </ul>
+    </div>
+
     <div class="card">
       <h3>发送文本</h3>
       <div class="form-group">
@@ -129,6 +145,7 @@ async function renderSendTab() {
     if (wrtcSelect) wrtcSelect.innerHTML = opts;
     applyPendingSendSelection();
     refreshWebrtcReceiverStatus();
+    refreshNearbyPeers(true);
   } catch (err) {
     showMessage('send-msg', '加载设备失败：' + err.message, 'error');
   }
@@ -196,10 +213,128 @@ async function chooseFileForSend() {
     const path = await tauriInvoke('choose_file_path');
     if (path) {
       document.getElementById('send-file-path').value = path;
+      const nearbyPath = document.getElementById('nearby-file-path');
+      if (nearbyPath) nearbyPath.value = path;
       setStatus('已选择文件', 'ok');
     }
   } catch (err) {
     showMessage('send-msg', '文件选择出错：' + err.message, 'error');
+  }
+}
+
+async function chooseNearbyFileForSend() {
+  try {
+    const path = await tauriInvoke('choose_file_path');
+    if (path) {
+      document.getElementById('nearby-file-path').value = path;
+      const manualPath = document.getElementById('send-file-path');
+      if (manualPath) manualPath.value = path;
+      setStatus('已选择文件', 'ok');
+    }
+  } catch (err) {
+    showMessage('send-msg', '文件选择出错：' + err.message, 'error');
+  }
+}
+
+function renderNearbyPeers() {
+  const list = document.getElementById('nearby-peer-list');
+  if (!list) return;
+  if (!cachedNearbyPeers.length) {
+    list.innerHTML = '<li class="device-item"><span class="device-meta">未发现附近 LinkHub 设备。</span></li>';
+    return;
+  }
+
+  list.innerHTML = cachedNearbyPeers.map(peer => `
+    <li class="device-item">
+      <div class="device-main">
+        <div class="device-title-row">
+          <span class="device-name">${escHtml(peer.device_name)}</span>
+          <span class="device-meta">${peer.trusted ? '已信任' : '首次连接'}</span>
+        </div>
+        <div class="device-meta">地址：<code>${escHtml(peer.address)}</code></div>
+        <div class="device-meta">指纹：<code>${escHtml(peer.fingerprint)}</code></div>
+        <div class="device-actions">
+          <button class="btn btn-primary btn-small" data-act="sendNearbyFile" data-a0="${escHtml(peer.device_id)}">发送文件</button>
+        </div>
+      </div>
+    </li>
+  `).join('');
+}
+
+async function refreshNearbyPeers(silent = false) {
+  const trustStorePath = getSetting('trustStorePath');
+  if (!trustStorePath) {
+    if (!silent) showMessage('send-msg', '尚未配置信任库路径。', 'error');
+    return;
+  }
+
+  if (!silent) setStatus('正在扫描附近设备…', 'info');
+  try {
+    const peers = await tauriInvoke('scan_mdns', {
+      trustStorePath,
+      timeoutSeconds: 4
+    });
+    cachedNearbyPeers = peers;
+    const now = Date.now();
+    peers.forEach(peer => {
+      setPeerAddress(peer.device_id, peer.address);
+      setPeerLastSeen(peer.device_id, now);
+    });
+    renderNearbyPeers();
+    if (!silent) {
+      setStatus(`发现 ${peers.length} 台附近设备`, peers.length ? 'ok' : 'info');
+      showMessage(
+        'send-msg',
+        peers.length ? `发现 ${peers.length} 台附近设备。` : '未发现附近 LinkHub 设备。',
+        peers.length ? 'success' : 'info'
+      );
+    }
+  } catch (err) {
+    if (!silent) showMessage('send-msg', '附近设备扫描出错：' + err.message, 'error');
+    setStatus('附近设备扫描失败', 'error');
+  }
+}
+
+async function sendNearbyFile(peerDeviceId) {
+  const peer = cachedNearbyPeers.find(item => item.device_id === peerDeviceId);
+  const identityPath = getSetting('identityPath');
+  const trustStorePath = getSetting('trustStorePath');
+  const historyPath = getSetting('historyPath');
+  const filePath = (
+    document.getElementById('nearby-file-path')?.value ||
+    document.getElementById('send-file-path')?.value ||
+    ''
+  ).trim();
+
+  if (!peer) {
+    showMessage('send-msg', '请先刷新附近设备。', 'error');
+    return;
+  }
+  if (!identityPath || !filePath) {
+    showMessage('send-msg', '请先选择文件，并确认身份已初始化。', 'error');
+    return;
+  }
+
+  setStatus(`正在发送给 ${peer.device_name}…`, 'info');
+  try {
+    const result = await tauriInvoke('send_file_to_discovered', {
+      peerAddr: peer.address,
+      identityPath,
+      peerDeviceId: peer.device_id,
+      peerDeviceName: peer.device_name,
+      peerPublicKey: peer.public_key,
+      peerDhPublicKey: peer.dh_public_key,
+      bindingSig: peer.binding_sig || '',
+      trustStorePath,
+      historyPath,
+      filePath
+    });
+    setPeerAddress(peer.device_id, peer.address);
+    showMessage('send-msg', result.detail, 'success');
+    setStatus('文件已发送', 'ok');
+  } catch (err) {
+    showMessage('send-msg', '附近设备发送错误：' + err.message, 'error');
+    setStatus('附近设备发送失败', 'error');
   }
 }
 
