@@ -72,6 +72,8 @@ object RustBridge {
     // Identity
     external fun generateIdentity(deviceName: String): String
     external fun restoreIdentity(signingKeyHex: String, staticDhKeyHex: String, deviceName: String): String
+    external fun signIdentityBinding(identityJson: String): String
+    external fun verifyIdentityBinding(deviceId: String, deviceName: String, publicKey: String, dhPublicKey: String, bindingSig: String): String
 
     // Pairing
     external fun generatePairingPayload(identityJson: String, ttlSeconds: Long): String
@@ -94,6 +96,7 @@ object RustBridge {
     // main thread, and on the foreground service so Doze doesn't suspend them.
     // iceConfigJson: {"ice_urls":[...],"turn_username":"","turn_credential":"","relay_only":false}
     external fun webrtcSendFile(identityJson: String, trustStorePath: String, peerDeviceId: String, signalingUrl: String, iceConfigJson: String, filePath: String): String
+    external fun webrtcSendFileToIdentity(identityJson: String, peerDeviceId: String, peerDeviceName: String, peerPublicKey: String, peerDhPublicKey: String, signalingUrl: String, iceConfigJson: String, filePath: String): String
     external fun webrtcReceiveFile(identityJson: String, trustStorePath: String, signalingUrl: String, iceConfigJson: String, receiveDir: String): String
     external fun webrtcStopReceiver(): String
 }

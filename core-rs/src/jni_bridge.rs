@@ -9,8 +9,8 @@ use jni::sys::jstring;
 use jni::{JNIEnv, JavaVM};
 
 use crate::{
-    AcceptPeerCallback, FileReceivedCallback, IncomingPeer, LocalIdentity, PairingInvitation,
-    PairingSession, ReceivedFileEvent, TrustStore,
+    AcceptPeerCallback, DeviceIdentity, FileReceivedCallback, IncomingPeer, LocalIdentity,
+    PairingInvitation, PairingSession, ReceivedFileEvent, TrustStore,
 };
 use serde::{Deserialize, Serialize};
 use std::net::TcpListener;
@@ -38,6 +38,15 @@ struct JniPeerInfo {
     device_name: String,
     fingerprint: String,
     confirmation_code: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct JniVerifyIdentityResult {
+    success: bool,
+    device_id: String,
+    device_name: String,
+    fingerprint: String,
+    error: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -138,6 +147,72 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_restoreIdentity(
         Ok(s) => make_string(&mut env, &s),
         Err(e) => make_string(&mut env, &err_json(&e)),
     }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_signIdentityBinding(
+    mut env: JNIEnv,
+    _class: JClass,
+    identity_json: JString,
+) -> jstring {
+    let result = (|| -> Result<String, String> {
+        let json = get_string(&mut env, &identity_json);
+        let jni: JniIdentity = serde_json::from_str(&json).map_err(|e| format!("{e}"))?;
+        let local = to_local_identity(&jni)?;
+        local.sign_identity_binding()
+    })();
+    match result {
+        Ok(s) => make_string(&mut env, &s),
+        Err(e) => make_string(&mut env, &err_json(&e)),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_verifyIdentityBinding(
+    mut env: JNIEnv,
+    _class: JClass,
+    device_id: JString,
+    device_name: JString,
+    public_key: JString,
+    dh_public_key: JString,
+    binding_sig: JString,
+) -> jstring {
+    let result = (|| -> Result<JniVerifyIdentityResult, String> {
+        let identity = DeviceIdentity::new(
+            get_string(&mut env, &device_id),
+            get_string(&mut env, &device_name),
+            get_string(&mut env, &public_key),
+            get_string(&mut env, &dh_public_key),
+        );
+        let sig = get_string(&mut env, &binding_sig);
+        if !identity.has_consistent_device_id() {
+            return Err("device_id does not match public_key".into());
+        }
+        let verified = identity
+            .verify_identity_binding(&sig)
+            .map_err(|e| format!("bad identity binding: {e}"))?;
+        if !verified {
+            return Err("identity binding signature rejected".into());
+        }
+        Ok(JniVerifyIdentityResult {
+            success: true,
+            device_id: identity.device_id().to_string(),
+            device_name: identity.device_name().to_string(),
+            fingerprint: identity.fingerprint(),
+            error: String::new(),
+        })
+    })();
+    let response = match result {
+        Ok(value) => ok_json(&value),
+        Err(error) => ok_json(&JniVerifyIdentityResult {
+            success: false,
+            device_id: String::new(),
+            device_name: String::new(),
+            fingerprint: String::new(),
+            error,
+        }),
+    };
+    make_string(&mut env, &response)
 }
 
 // ── Pairing ────────────────────────────────────────────────────────
@@ -331,6 +406,46 @@ pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_webrtcSendFile(
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_webrtcSendFileToIdentity(
+    mut env: JNIEnv,
+    _class: JClass,
+    identity_json: JString,
+    peer_device_id: JString,
+    peer_device_name: JString,
+    peer_public_key: JString,
+    peer_dh_public_key: JString,
+    signaling_url: JString,
+    ice_config_json: JString,
+    file_path: JString,
+) -> jstring {
+    let result = (|| -> Result<String, String> {
+        install_panic_hook();
+        let json = get_string(&mut env, &identity_json);
+        let peer_id = get_string(&mut env, &peer_device_id);
+        let peer_name = get_string(&mut env, &peer_device_name);
+        let peer_public_key = get_string(&mut env, &peer_public_key);
+        let peer_dh_public_key = get_string(&mut env, &peer_dh_public_key);
+        let url = get_string(&mut env, &signaling_url);
+        let ice_json = get_string(&mut env, &ice_config_json);
+        let path = get_string(&mut env, &file_path);
+        webrtc_send_file_to_identity_impl(
+            json,
+            peer_id,
+            peer_name,
+            peer_public_key,
+            peer_dh_public_key,
+            url,
+            ice_json,
+            path,
+        )
+    })();
+    match result {
+        Ok(s) => make_string(&mut env, &s),
+        Err(e) => make_string(&mut env, &err_json(&e)),
+    }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_linkhub_app_bridge_RustBridge_webrtcReceiveFile(
     mut env: JNIEnv,
     _class: JClass,
@@ -405,6 +520,21 @@ fn webrtc_send_file_impl(
 }
 
 #[cfg(not(feature = "webrtc"))]
+#[allow(clippy::too_many_arguments)]
+fn webrtc_send_file_to_identity_impl(
+    _identity_json: String,
+    _peer_device_id: String,
+    _peer_device_name: String,
+    _peer_public_key: String,
+    _peer_dh_public_key: String,
+    _signaling_url: String,
+    _ice_config_json: String,
+    _file_path: String,
+) -> Result<String, String> {
+    Err("cross-network WebRTC unavailable: build the .so with --features webrtc".into())
+}
+
+#[cfg(not(feature = "webrtc"))]
 fn webrtc_receive_file_impl(
     _identity_json: String,
     _trust_store_path: String,
@@ -433,6 +563,44 @@ fn webrtc_send_file_impl(
         .trusted_device(&peer_device_id)
         .map(|trusted| trusted.identity().clone())
         .ok_or_else(|| format!("peer device not trusted: {peer_device_id}"))?;
+    let ice = parse_ice_config(&ice_config_json)?;
+    crate::net::webrtc_session::send_file_over_webrtc(
+        &signaling_url,
+        &local,
+        &peer,
+        ice,
+        &file_path,
+    )
+    .map_err(|e| format!("webrtc send failed: {e}"))?;
+    Ok(ok_json(&JniSendResult {
+        success: true,
+        detail: "file sent over webrtc".into(),
+    }))
+}
+
+#[cfg(feature = "webrtc")]
+#[allow(clippy::too_many_arguments)]
+fn webrtc_send_file_to_identity_impl(
+    identity_json: String,
+    peer_device_id: String,
+    peer_device_name: String,
+    peer_public_key: String,
+    peer_dh_public_key: String,
+    signaling_url: String,
+    ice_config_json: String,
+    file_path: String,
+) -> Result<String, String> {
+    let jni: JniIdentity = serde_json::from_str(&identity_json).map_err(|e| format!("{e}"))?;
+    let local = to_local_identity(&jni)?;
+    let peer = DeviceIdentity::new(
+        peer_device_id,
+        peer_device_name,
+        peer_public_key,
+        peer_dh_public_key,
+    );
+    if !peer.has_consistent_device_id() {
+        return Err("peer device_id does not match public_key".into());
+    }
     let ice = parse_ice_config(&ice_config_json)?;
     crate::net::webrtc_session::send_file_over_webrtc(
         &signaling_url,

@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -54,6 +55,7 @@ fun SendScreen() {
     val scope = rememberCoroutineScope()
     var identity by remember { mutableStateOf<IdentityJson?>(null) }
     var peers by remember { mutableStateOf<List<TrustedPeer>>(emptyList()) }
+    var nearbyPeers by remember { mutableStateOf<List<DiscoveredPeerAddress>>(emptyList()) }
     var selectedPeer by remember { mutableStateOf<TrustedPeer?>(null) }
     var peerAddr by remember { mutableStateOf("") }
     var textInput by remember { mutableStateOf("") }
@@ -85,8 +87,10 @@ fun SendScreen() {
 
     LaunchedEffect(Unit) {
         try {
-            identity = loadIdentity(ctx)
+            val loadedIdentity = loadIdentity(ctx)
+            identity = loadedIdentity
             peers = loadTrustedPeers(ctx)
+            nearbyPeers = scanAndroidMdnsPeers(ctx).filter { it.deviceId != loadedIdentity?.deviceId }
             webRtcConfig = loadWebRtcConfig(ctx)
         } catch (_: Exception) {
         }
@@ -98,9 +102,10 @@ fun SendScreen() {
     LaunchedEffect(Unit) {
         while (true) {
             try {
-                val found = scanTrustedMdnsPeers(ctx)
+                val found = scanAndroidMdnsPeers(ctx)
+                nearbyPeers = found.filter { it.deviceId != identity?.deviceId }
                 if (found.isNotEmpty()) {
-                    found.forEach { updatePeerAddress(ctx, it.deviceId, it.address) }
+                    found.filter { it.trusted }.forEach { updatePeerAddress(ctx, it.deviceId, it.address) }
                     peers = loadTrustedPeers(ctx)
                     val sel = selectedPeer
                     if (sel != null) {
@@ -130,6 +135,97 @@ fun SendScreen() {
         } else if (identity == null) {
             Text("未找到身份，请先在配对页生成", color = MaterialTheme.colorScheme.error)
         } else {
+            Text("附近设备", style = MaterialTheme.typography.titleSmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = {
+                        val currentIdentity = identity
+                        sending = true
+                        statusMsg = "正在发现附近 LinkHub 设备..."
+                        scope.launch {
+                            try {
+                                val found = scanAndroidMdnsPeers(ctx)
+                                nearbyPeers = found.filter { it.deviceId != currentIdentity?.deviceId }
+                                found.filter { it.trusted }.forEach { updatePeerAddress(ctx, it.deviceId, it.address) }
+                                peers = loadTrustedPeers(ctx)
+                                statusMsg = if (nearbyPeers.isEmpty()) {
+                                    "未发现附近设备"
+                                } else {
+                                    "发现 ${nearbyPeers.size} 台附近设备"
+                                }
+                            } catch (e: Exception) {
+                                statusMsg = "发现失败: ${e.message}"
+                            } finally {
+                                sending = false
+                            }
+                        }
+                    },
+                    enabled = !sending
+                ) {
+                    Text("刷新发现")
+                }
+                Button(onClick = { filePicker.launch("*/*") }, enabled = !sending) {
+                    Text("选择文件")
+                }
+            }
+            if (nearbyPeers.isEmpty()) {
+                Text("暂无附近设备。确认对方已启动监听服务。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    nearbyPeers.forEach { nearby ->
+                        Card(modifier = Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(nearby.deviceName, style = MaterialTheme.typography.titleSmall)
+                                    Text(
+                                        if (nearby.trusted) "已信任 · ${nearby.address}" else "首次发送 · ${nearby.address}",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                    if (nearby.fingerprint.isNotBlank()) {
+                                        Text(
+                                            "安全码: ${nearby.fingerprint}",
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                                Button(
+                                    onClick = {
+                                        val currentIdentity = identity ?: return@Button
+                                        val currentPeer = nearby.toTrustedPeer()
+                                        val currentPath = filePath.trim()
+                                        val currentConfig = webRtcConfig
+                                        saveWebRtcConfig(ctx, currentConfig)
+                                        sending = true
+                                        statusMsg = "正在发送文件到 ${nearby.deviceName}..."
+                                        scope.launch {
+                                            statusMsg = sendFileAutoOnIo(
+                                                ctx,
+                                                gson,
+                                                currentIdentity,
+                                                currentPeer,
+                                                currentPath,
+                                                currentConfig
+                                            )
+                                            sending = false
+                                        }
+                                    },
+                                    enabled = filePath.isNotBlank() && nearby.dhPublicKey.isNotBlank() && !sending
+                                ) {
+                                    Text(if (sending) "发送中..." else "发送文件")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Divider()
+
             if (peers.isNotEmpty()) {
                 Text("选择可信设备", style = MaterialTheme.typography.titleSmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
@@ -472,6 +568,89 @@ private suspend fun sendWebRtcFileOnIo(
     }
 }
 
+private suspend fun sendFileAutoOnIo(
+    ctx: Context,
+    gson: Gson,
+    identity: IdentityJson,
+    peer: TrustedPeer,
+    filePath: String,
+    config: AndroidWebRtcConfig
+): String = withContext(Dispatchers.IO) {
+    try {
+        val file = File(filePath)
+        if (!file.exists() || !file.isFile) {
+            val status = "发送失败: 文件不存在或不可读取"
+            recordSendHistory(ctx, peer, "file", filePath, false, status)
+            showTransferNotification(ctx, peer, "file", "文件发送失败", "${peer.deviceName}: $status")
+            return@withContext status
+        }
+        if (peer.address.isBlank()) {
+            val status = "发送失败: 未发现局域网地址"
+            recordSendHistory(ctx, peer, "file", file.name, false, status)
+            showTransferNotification(ctx, peer, "file", "文件发送失败", "${peer.deviceName}: $status")
+            return@withContext status
+        }
+
+        showTransferNotification(ctx, peer, "file", "正在发送文件", "${peer.deviceName}: ${file.name}", inProgress = true)
+        val lanResult = RustBridge.sendFile(
+            gson.toJson(identity),
+            peer.address,
+            peer.deviceId,
+            peer.dhPublicKey,
+            file.absolutePath
+        )
+        val lanParsed = parseSendResult(gson, lanResult)
+        if (lanParsed?.success == true) {
+            val status = "文件已发送"
+            recordSendHistory(ctx, peer, "file", file.name, true, status)
+            showTransferNotification(ctx, peer, "file", "文件已发送", "${peer.deviceName}: ${file.name}")
+            return@withContext status
+        }
+
+        val lanStatus = resultStatus(lanParsed, lanResult, "文件已发送")
+        val signalingUrl = config.signalingUrl.trim()
+        if (signalingUrl.isBlank()) {
+            val status = "发送失败: LAN ${lanStatus.removePrefix("失败: ")}; 信令服务器 URL 为空"
+            recordSendHistory(ctx, peer, "file", file.name, false, status)
+            showTransferNotification(ctx, peer, "file", "文件发送失败", "${peer.deviceName}: $status")
+            return@withContext status
+        }
+
+        val iceConfigJson = webRtcIceConfigJson(gson, config)
+        val rtcResult = RustBridge.webrtcSendFileToIdentity(
+            gson.toJson(identity),
+            peer.deviceId,
+            peer.deviceName,
+            peer.publicKey,
+            peer.dhPublicKey,
+            signalingUrl,
+            iceConfigJson,
+            file.absolutePath
+        )
+        val rtcParsed = parseSendResult(gson, rtcResult)
+        val status = if (rtcParsed?.success == true) {
+            "LAN 不可达，已通过跨网络发送"
+        } else {
+            val rtcStatus = friendlyWebRtcStatus(resultStatus(rtcParsed, rtcResult, "跨网络文件已发送"))
+            "发送失败: LAN ${lanStatus.removePrefix("失败: ")}; WebRTC ${rtcStatus.removePrefix("失败: ")}"
+        }
+        recordSendHistory(ctx, peer, "file", file.name, rtcParsed?.success == true, status)
+        showTransferNotification(
+            ctx,
+            peer,
+            "file",
+            if (rtcParsed?.success == true) "文件已发送" else "文件发送失败",
+            "${peer.deviceName}: ${file.name} - $status"
+        )
+        status
+    } catch (e: Exception) {
+        val status = "发送失败: ${e.message}"
+        recordSendHistory(ctx, peer, "file", filePath, false, status)
+        showTransferNotification(ctx, peer, "file", "文件发送失败", "${peer.deviceName}: $status")
+        status
+    }
+}
+
 private fun parseSendResult(gson: Gson, result: String): SendResultJson? {
     return try {
         gson.fromJson(result, SendResultJson::class.java)
@@ -504,6 +683,17 @@ private fun recordSendHistory(
             status = if (success) "success" else "failed",
             detail = detail
         )
+    )
+}
+
+private fun DiscoveredPeerAddress.toTrustedPeer(): TrustedPeer {
+    return TrustedPeer(
+        deviceId = deviceId,
+        deviceName = deviceName,
+        fingerprint = fingerprint,
+        publicKey = publicKey,
+        dhPublicKey = dhPublicKey,
+        address = address
     )
 }
 
