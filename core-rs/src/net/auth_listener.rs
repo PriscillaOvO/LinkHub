@@ -68,6 +68,28 @@ pub struct ReceivedFileEvent {
 /// per-session worker thread, so it must be `Send + Sync`.
 pub type FileReceivedCallback = Arc<dyn Fn(ReceivedFileEvent) + Send + Sync>;
 
+/// A not-yet-trusted peer requesting to connect at first contact (no prior
+/// pairing). The identity is **already cryptographically verified** before this
+/// is surfaced: `device_id` derives from `public_key`, and `public_key` has
+/// signed `dh_public_key` (so the wire DH key can't be MITM-swapped). The shell
+/// only has to decide whether the *user* trusts this device (AirDrop-style
+/// accept prompt showing `fingerprint`); the crypto is settled.
+#[derive(Clone, Debug)]
+pub struct IncomingPeer {
+    pub device_id: String,
+    pub device_name: String,
+    pub public_key: String,
+    pub dh_public_key: String,
+    pub fingerprint: String,
+}
+
+/// Decides whether to accept a first-contact peer. Runs on the per-session
+/// worker thread and **blocks the handshake** until it returns, so a UI shell
+/// can show an accept/reject prompt. Returning `true` should also persist the
+/// device to the trust store (build it from the `public_key`/`dh_public_key` in
+/// [`IncomingPeer`]) so subsequent connections from it are silent.
+pub type AcceptPeerCallback = Arc<dyn Fn(IncomingPeer) -> bool + Send + Sync>;
+
 pub fn run_authenticated_listener_on(
     listener: TcpListener,
     bind_label: &str,

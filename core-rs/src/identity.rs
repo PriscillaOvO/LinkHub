@@ -29,6 +29,7 @@ const SECURE_LOCAL_IDENTITY_PLATFORM_WINDOWS_DPAPI: &str = "windows-dpapi-user";
 const SECURE_LOCAL_IDENTITY_PLATFORM_MACOS_KEYCHAIN: &str = "macos-keychain";
 const SECURE_LOCAL_IDENTITY_PLATFORM_LINUX_SECRET_SERVICE: &str = "linux-secret-service";
 const HANDSHAKE_CHALLENGE_HEADER: &str = "linkhub-auth-v1";
+const IDENTITY_BINDING_HEADER: &str = "linkhub-identity-binding-v1";
 const SIGNALING_SDP_HEADER: &str = "linkhub-signaling-sdp-v1";
 const PAIRING_PAYLOAD_HEADER: &str = "linkhub-pair-v2";
 const TRUST_STORE_HEADER: &str = "linkhub_trust_store_v1";
@@ -51,6 +52,25 @@ pub fn handshake_challenge(signer_device_id: &str, peer_device_id: &str, nonce: 
         peer_device_id.trim(),
         nonce.trim()
     )
+}
+
+/// Domain-separated bytes a device signs over its own static keys so a peer can,
+/// at first contact (no prior pairing), trust a wire-transmitted X25519 DH public
+/// key (used for the Noise KK session) as genuinely belonging to the Ed25519
+/// identity it is accepting. Binds `device_id` (itself = hash of the Ed25519 key)
+/// to `dh_public_key`; without this an active MITM could relay the real sender's
+/// signed handshake while swapping in its own DH key (the handshake signature
+/// covers only the two device ids + nonce, never the DH key). The dedicated
+/// header keeps it distinct from [`handshake_challenge`] / signaling domains.
+/// Pairs with [`DeviceIdentity::verify_identity_binding`] — keep byte-for-byte.
+pub(crate) fn identity_binding_message(device_id: &str, dh_public_key: &str) -> Vec<u8> {
+    let mut message = Vec::new();
+    message.extend_from_slice(IDENTITY_BINDING_HEADER.as_bytes());
+    message.push(0);
+    message.extend_from_slice(device_id.trim().as_bytes());
+    message.push(0);
+    message.extend_from_slice(dh_public_key.trim().as_bytes());
+    message
 }
 
 /// Domain-separated bytes a device signs over a WebRTC SDP signal so a malicious

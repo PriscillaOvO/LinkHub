@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::crypto::{NoiseHandshake, NoiseTransport};
-use crate::{new_handshake_nonce, LocalIdentity, TrustStore};
+use crate::{new_handshake_nonce, DeviceIdentity, LocalIdentity, TrustStore};
 
 use super::ack::{
     file_start_ack_supports_bin, parse_file_start_ack_status, write_message, ACK_TIMEOUT,
@@ -28,7 +28,9 @@ use super::file_transfer::{
 use super::protocol::{
     decode_hex, encode_hex, parse_binary_frame, parse_message, serialize_message_bytes, WireMessage,
 };
-use super::{FileReceivedCallback, LocalDevice, ReceivedFileEvent};
+use super::{
+    AcceptPeerCallback, FileReceivedCallback, IncomingPeer, LocalDevice, ReceivedFileEvent,
+};
 
 pub(super) fn run_authenticated_session(
     stream: TcpStream,
@@ -46,6 +48,7 @@ pub(super) fn run_authenticated_session(
         trust_store,
         receive_dir,
         on_file_received,
+        None,
     )
 }
 
@@ -63,6 +66,7 @@ pub(super) fn run_authenticated_session_over<W: Write, R: BufRead>(
     trust_store: Arc<TrustStore>,
     receive_dir: PathBuf,
     on_file_received: Option<FileReceivedCallback>,
+    on_accept: Option<AcceptPeerCallback>,
 ) -> io::Result<()> {
     let mut line = String::new();
 
@@ -84,15 +88,31 @@ pub(super) fn run_authenticated_session_over<W: Write, R: BufRead>(
         Err(err) => return Err(io::Error::new(io::ErrorKind::InvalidData, err)),
     };
 
-    let Some(trusted) = trust_store.trusted_device(&peer_device_id) else {
-        write_message(
-            &mut writer,
-            &WireMessage::ack(&peer_device_id, "AUTH_UNTRUSTED"),
-        )?;
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("untrusted authenticated peer: {peer_device_id}"),
-        ));
+    // Resolve the peer's verified identity. Known peers come straight from the
+    // trust store (unchanged). An unknown peer is only entertained when an accept
+    // callback is provided (AirDrop-style first contact): we ask it for a signed
+    // identity, verify the crypto, then let the shell prompt the user.
+    let peer_identity = match trust_store.trusted_device(&peer_device_id) {
+        Some(trusted) => trusted.identity().clone(),
+        None => match on_accept.as_ref() {
+            Some(accept) => resolve_first_contact_identity(
+                &mut writer,
+                &mut reader,
+                &mut line,
+                &peer_device_id,
+                accept.as_ref(),
+            )?,
+            None => {
+                write_message(
+                    &mut writer,
+                    &WireMessage::ack(&peer_device_id, "AUTH_UNTRUSTED"),
+                )?;
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("untrusted authenticated peer: {peer_device_id}"),
+                ));
+            }
+        },
     };
 
     let nonce = new_handshake_nonce();
@@ -111,8 +131,7 @@ pub(super) fn run_authenticated_session_over<W: Write, R: BufRead>(
             device_id,
             signature_hex,
         }) if device_id == peer_device_id => {
-            let verified = trusted
-                .identity()
+            let verified = peer_identity
                 .verify_handshake_signature(local_identity.device_id(), &nonce, &signature_hex)
                 .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
 
@@ -137,7 +156,7 @@ pub(super) fn run_authenticated_session_over<W: Write, R: BufRead>(
     }
 
     // --- Noise KK handshake (responder side) ---
-    let peer_db = trusted.identity().dh_public_key().to_string();
+    let peer_db = peer_identity.dh_public_key().to_string();
     let peer_db_bytes =
         decode_hex(&peer_db).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     let peer_db_bytes: [u8; 32] = peer_db_bytes
@@ -649,6 +668,113 @@ fn recv_encrypted_frame<R: BufRead>(
     parse_binary_frame(&plaintext).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
+/// First-contact (no prior pairing) identity resolution on the responder side:
+/// ask the unknown initiator for its signed identity, verify it cryptographically
+/// (the claimed `device_id` derives from the presented Ed25519 key, and that key
+/// has signed its X25519 DH key), then let the shell's [`AcceptPeerCallback`]
+/// prompt the user. Returns the verified identity that drives the rest of the
+/// session, so a Noise KK against the wire DH key is safe even without pairing.
+fn resolve_first_contact_identity<W: Write, R: BufRead>(
+    writer: &mut W,
+    reader: &mut R,
+    line: &mut String,
+    peer_device_id: &str,
+    accept: &(dyn Fn(IncomingPeer) -> bool + Send + Sync),
+) -> io::Result<DeviceIdentity> {
+    write_message(
+        writer,
+        &WireMessage::ack(peer_device_id, "AUTH_NEED_IDENTITY"),
+    )?;
+
+    line.clear();
+    if reader.read_line(line)? == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "connection closed before IDENTITY",
+        ));
+    }
+
+    let (device_id, device_name, public_key, dh_public_key, binding_sig) =
+        match parse_message(line.trim_end()) {
+            Ok(WireMessage::Identity {
+                device_id,
+                device_name,
+                public_key,
+                dh_public_key,
+                binding_sig,
+            }) => (
+                device_id,
+                device_name,
+                public_key,
+                dh_public_key,
+                binding_sig,
+            ),
+            Ok(message) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("expected IDENTITY, received {message:?}"),
+                ));
+            }
+            Err(err) => return Err(io::Error::new(io::ErrorKind::InvalidData, err)),
+        };
+
+    if device_id != peer_device_id {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "IDENTITY device_id does not match HELLO",
+        ));
+    }
+
+    let identity = DeviceIdentity::new(
+        device_id.clone(),
+        device_name.clone(),
+        public_key.clone(),
+        dh_public_key.clone(),
+    );
+
+    // The claimed device_id must be the stable hash of the presented Ed25519 key.
+    if !identity.has_consistent_device_id() {
+        write_message(writer, &WireMessage::ack(peer_device_id, "AUTH_REJECTED"))?;
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("first-contact identity has inconsistent device_id: {peer_device_id}"),
+        ));
+    }
+
+    // That Ed25519 key must have signed its own DH key, so an active MITM cannot
+    // relay the real sender's signed handshake while swapping in its own DH key.
+    let bound = identity
+        .verify_identity_binding(&binding_sig)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    if !bound {
+        write_message(writer, &WireMessage::ack(peer_device_id, "AUTH_REJECTED"))?;
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("first-contact identity binding signature invalid: {peer_device_id}"),
+        ));
+    }
+
+    let fingerprint = identity.fingerprint();
+    let accepted = accept(IncomingPeer {
+        device_id,
+        device_name,
+        public_key,
+        dh_public_key,
+        fingerprint,
+    });
+
+    if !accepted {
+        write_message(writer, &WireMessage::ack(peer_device_id, "AUTH_REJECTED"))?;
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("first-contact peer rejected by user: {peer_device_id}"),
+        ));
+    }
+
+    println!("First-contact peer accepted: {peer_device_id}");
+    Ok(identity)
+}
+
 pub(super) fn open_authenticated_stream(
     peer_addr: &str,
     local_identity: &LocalIdentity,
@@ -685,7 +811,7 @@ pub(super) fn perform_initiator_handshake<W: Write, R: BufRead>(
     let local = LocalDevice::new(local_identity.device_id(), local_identity.device_name());
 
     write_message(writer, &WireMessage::hello(&local))?;
-    let nonce = wait_for_auth_challenge(reader)?;
+    let nonce = wait_for_auth_challenge(writer, reader, local_identity)?;
     let signature = local_identity
         .sign_handshake_challenge(peer_device_id, &nonce)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
@@ -764,7 +890,11 @@ pub(super) fn perform_initiator_handshake<W: Write, R: BufRead>(
     Ok(transport)
 }
 
-fn wait_for_auth_challenge<R: BufRead>(reader: &mut R) -> io::Result<String> {
+fn wait_for_auth_challenge<W: Write, R: BufRead>(
+    writer: &mut W,
+    reader: &mut R,
+    local_identity: &LocalIdentity,
+) -> io::Result<String> {
     loop {
         let mut response = String::new();
         let bytes_read = reader.read_line(&mut response)?;
@@ -778,6 +908,25 @@ fn wait_for_auth_challenge<R: BufRead>(reader: &mut R) -> io::Result<String> {
 
         match parse_message(response.trim_end()) {
             Ok(WireMessage::AuthChallenge { nonce }) => return Ok(nonce),
+            // First contact: the responder doesn't know us yet and asks for our
+            // identity. Send our signed identity (Ed25519 + DH-binding signature)
+            // so it can verify the crypto and prompt the user to accept us.
+            Ok(WireMessage::Ack { status, .. }) if status == "AUTH_NEED_IDENTITY" => {
+                let binding_sig = local_identity
+                    .sign_identity_binding()
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+                write_message(
+                    writer,
+                    &WireMessage::identity(
+                        local_identity.device_id(),
+                        local_identity.device_name(),
+                        local_identity.public_key(),
+                        local_identity.dh_public_key(),
+                        &binding_sig,
+                    ),
+                )?;
+                continue;
+            }
             Ok(WireMessage::Ack { message_id, status }) => {
                 return Err(io::Error::new(
                     io::ErrorKind::PermissionDenied,
@@ -990,6 +1139,7 @@ mod transport_tests {
                 trust,
                 receive_dir_for_thread,
                 None,
+                None,
             )
         });
 
@@ -1072,6 +1222,7 @@ mod transport_tests {
                 trust,
                 receive_dir_for_thread,
                 None,
+                None,
             )
         });
 
@@ -1116,6 +1267,156 @@ mod transport_tests {
             matched,
             "a received file matching the {}-byte source must exist in {receive_dir:?}",
             payload.len()
+        );
+
+        let _ = std::fs::remove_dir_all(&receive_dir);
+    }
+
+    /// AirDrop-style first contact: an initiator the responder has **never paired
+    /// with** connects; the accept callback approves it; the encrypted TEXT still
+    /// round-trips, and the callback is handed the initiator's verified identity.
+    #[test]
+    fn first_contact_accept_round_trips_over_in_memory_transport() {
+        let now = SystemTime::now();
+        let initiator = LocalIdentity::generate("Initiator", now);
+        let responder = LocalIdentity::generate("Responder", now);
+        let responder_dh = dh_bytes(&responder);
+
+        // Empty trust store — the responder does not know the initiator.
+        let trust = Arc::new(TrustStore::new());
+
+        let seen: Arc<Mutex<Option<IncomingPeer>>> = Arc::new(Mutex::new(None));
+        let seen_for_cb = seen.clone();
+        let accept: AcceptPeerCallback = Arc::new(move |peer: IncomingPeer| {
+            *seen_for_cb.lock().unwrap() = Some(peer);
+            true
+        });
+
+        let receive_dir = std::env::temp_dir().join(format!(
+            "linkhub-fc-{}-{:?}",
+            now.duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            thread::current().id()
+        ));
+
+        let (initiator_end, responder_end) = MemoryDuplex::pair();
+        let resp_writer = responder_end.handle();
+        let resp_reader = BufReader::new(responder_end.handle());
+        let responder_identity = responder.clone();
+        let receive_dir_for_thread = receive_dir.clone();
+        let responder_thread = thread::spawn(move || {
+            run_authenticated_session_over(
+                resp_writer,
+                resp_reader,
+                responder_identity,
+                trust,
+                receive_dir_for_thread,
+                None,
+                Some(accept),
+            )
+        });
+
+        let mut init_writer = initiator_end.handle();
+        let mut init_reader = BufReader::new(initiator_end.handle());
+        let mut transport = perform_initiator_handshake(
+            &mut init_writer,
+            &mut init_reader,
+            &initiator,
+            responder.device_id(),
+            &responder_dh,
+        )
+        .expect("first-contact initiator handshake should complete");
+
+        let message_id = format!("{}-fc-1", initiator.device_id());
+        send_encrypted_with_ack_retries(
+            &mut transport,
+            &mut init_writer,
+            &mut init_reader,
+            &message_id,
+            "TEXT_RECEIVED",
+            || WireMessage::text(&message_id, "hello at first contact"),
+            "TEXT",
+        )
+        .expect("encrypted TEXT should be acknowledged after first-contact accept");
+
+        init_writer.close_tx();
+        let responder_result = responder_thread.join().expect("responder thread panicked");
+        assert!(
+            responder_result.is_ok(),
+            "responder session should end Ok on EOF, got {responder_result:?}"
+        );
+
+        // The callback received the initiator's *verified* identity (the crypto
+        // is settled before the prompt), so the fingerprint matches exactly.
+        let peer = seen
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("accept callback should have been called");
+        assert_eq!(peer.device_id, initiator.device_id());
+        assert_eq!(peer.fingerprint, initiator.identity().fingerprint());
+        assert_eq!(peer.dh_public_key, initiator.dh_public_key());
+
+        let _ = std::fs::remove_dir_all(&receive_dir);
+    }
+
+    /// First contact where the user declines: the responder rejects and both
+    /// sides end in error — no session, no trust.
+    #[test]
+    fn first_contact_reject_fails_handshake() {
+        let now = SystemTime::now();
+        let initiator = LocalIdentity::generate("Initiator", now);
+        let responder = LocalIdentity::generate("Responder", now);
+        let responder_dh = dh_bytes(&responder);
+        let trust = Arc::new(TrustStore::new());
+
+        let reject: AcceptPeerCallback = Arc::new(|_peer: IncomingPeer| false);
+
+        let receive_dir = std::env::temp_dir().join(format!(
+            "linkhub-fc-rej-{}-{:?}",
+            now.duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            thread::current().id()
+        ));
+
+        let (initiator_end, responder_end) = MemoryDuplex::pair();
+        let resp_writer = responder_end.handle();
+        let resp_reader = BufReader::new(responder_end.handle());
+        let responder_identity = responder.clone();
+        let receive_dir_for_thread = receive_dir.clone();
+        let responder_thread = thread::spawn(move || {
+            run_authenticated_session_over(
+                resp_writer,
+                resp_reader,
+                responder_identity,
+                trust,
+                receive_dir_for_thread,
+                None,
+                Some(reject),
+            )
+        });
+
+        let mut init_writer = initiator_end.handle();
+        let mut init_reader = BufReader::new(initiator_end.handle());
+        let init_result = perform_initiator_handshake(
+            &mut init_writer,
+            &mut init_reader,
+            &initiator,
+            responder.device_id(),
+            &responder_dh,
+        );
+        assert!(
+            init_result.is_err(),
+            "initiator handshake must fail when the peer rejects first contact"
+        );
+
+        init_writer.close_tx();
+        let responder_result = responder_thread.join().expect("responder thread panicked");
+        assert!(
+            responder_result.is_err(),
+            "responder must reject an unaccepted first-contact peer"
         );
 
         let _ = std::fs::remove_dir_all(&receive_dir);

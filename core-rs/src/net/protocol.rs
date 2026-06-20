@@ -18,6 +18,18 @@ pub(in crate::net) enum WireMessage {
     NoiseHs {
         payload_hex: String,
     },
+    /// First-contact identity announcement (no prior pairing): the initiator's
+    /// full public identity plus a binding signature over its X25519 DH key, so
+    /// the responder can verify self-consistency + the DH binding, prompt the
+    /// user to accept, and then run Noise KK against the wire-transmitted DH key.
+    /// See the first-contact flow in `net::auth_session`.
+    Identity {
+        device_id: String,
+        device_name: String,
+        public_key: String,
+        dh_public_key: String,
+        binding_sig: String,
+    },
     Heartbeat(HeartbeatUpdate),
     Text {
         message_id: String,
@@ -134,6 +146,22 @@ impl WireMessage {
     pub(in crate::net) fn noise_hs(payload_hex: &str) -> Self {
         WireMessage::NoiseHs {
             payload_hex: sanitize_field(payload_hex),
+        }
+    }
+
+    pub(in crate::net) fn identity(
+        device_id: &str,
+        device_name: &str,
+        public_key: &str,
+        dh_public_key: &str,
+        binding_sig: &str,
+    ) -> Self {
+        WireMessage::Identity {
+            device_id: sanitize_field(device_id),
+            device_name: sanitize_field(device_name),
+            public_key: sanitize_field(public_key),
+            dh_public_key: sanitize_field(dh_public_key),
+            binding_sig: sanitize_field(binding_sig),
         }
     }
 
@@ -306,6 +334,15 @@ pub(in crate::net) fn serialize_message(message: &WireMessage) -> String {
             format!("AUTH_SIGNATURE\t{device_id}\t{signature_hex}")
         }
         WireMessage::NoiseHs { payload_hex } => format!("NOISE_HS\t{payload_hex}"),
+        WireMessage::Identity {
+            device_id,
+            device_name,
+            public_key,
+            dh_public_key,
+            binding_sig,
+        } => format!(
+            "IDENTITY\t{device_id}\t{device_name}\t{public_key}\t{dh_public_key}\t{binding_sig}"
+        ),
         WireMessage::Heartbeat(update) => format!(
             "HEARTBEAT\t{}\t{}\t{}\t{}\t{}",
             update.transport,
@@ -412,6 +449,20 @@ pub(in crate::net) fn parse_message(line: &str) -> Result<WireMessage, String> {
         ["NOISE_HS", payload_hex] if !payload_hex.is_empty() => Ok(WireMessage::NoiseHs {
             payload_hex: (*payload_hex).to_string(),
         }),
+        ["IDENTITY", device_id, device_name, public_key, dh_public_key, binding_sig]
+            if !device_id.is_empty()
+                && !public_key.is_empty()
+                && !dh_public_key.is_empty()
+                && !binding_sig.is_empty() =>
+        {
+            Ok(WireMessage::Identity {
+                device_id: (*device_id).to_string(),
+                device_name: (*device_name).to_string(),
+                public_key: (*public_key).to_string(),
+                dh_public_key: (*dh_public_key).to_string(),
+                binding_sig: (*binding_sig).to_string(),
+            })
+        }
         ["HEARTBEAT", transport, latency_ms, bandwidth_score, battery_cost, metered_cost] => {
             Ok(WireMessage::Heartbeat(HeartbeatUpdate {
                 transport: transport.parse()?,
@@ -732,6 +783,27 @@ mod tests {
         let message = WireMessage::noise_hs("deadbeef");
 
         assert_eq!(serialize_message(&message), "NOISE_HS\tdeadbeef");
+    }
+
+    #[test]
+    fn round_trips_identity_message() {
+        let message =
+            WireMessage::identity("lh-abcdef0123456789", "Alice Phone", "aa11", "bb22", "cc33");
+        let line = serialize_message(&message);
+
+        assert_eq!(
+            line,
+            "IDENTITY\tlh-abcdef0123456789\tAlice Phone\taa11\tbb22\tcc33"
+        );
+        assert_eq!(parse_message(&line).unwrap(), message);
+    }
+
+    #[test]
+    fn rejects_identity_message_missing_fields() {
+        // Empty binding signature must be rejected.
+        assert!(parse_message("IDENTITY\tlh-x\tName\taa\tbb\t").is_err());
+        // Empty dh public key must be rejected.
+        assert!(parse_message("IDENTITY\tlh-x\tName\taa\t\tcc").is_err());
     }
 
     #[test]

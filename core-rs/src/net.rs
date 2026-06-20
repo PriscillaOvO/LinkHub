@@ -38,7 +38,8 @@ use session::run_peer_session;
 pub use auth_listener::{
     run_authenticated_listener_on, run_authenticated_listener_on_with_callback,
     run_authenticated_listener_until, run_authenticated_listener_with_receive_dir,
-    run_authenticated_text_listener, FileReceivedCallback, ReceivedFileEvent,
+    run_authenticated_text_listener, AcceptPeerCallback, FileReceivedCallback, IncomingPeer,
+    ReceivedFileEvent,
 };
 pub use connection_plan::{
     attempt_with_fallback, plan_connection, preferred_established_route, ConnectionPath,
@@ -238,6 +239,34 @@ pub fn run_authenticated_responder_over<W: Write, R: BufRead>(
         trust_store,
         receive_dir.as_ref().to_path_buf(),
         on_file_received,
+        None,
+    )
+}
+
+/// Responder side with AirDrop-style first contact: an `on_accept` callback is
+/// consulted when an *untrusted* peer connects. The peer's identity is verified
+/// (device id derives from its Ed25519 key; that key has signed its DH key)
+/// before the callback is asked, so the callback only decides user trust — return
+/// `true` to accept (and persist the device for silent future transfers). Known
+/// peers skip the callback entirely (unchanged trust-store path).
+#[allow(clippy::too_many_arguments)]
+pub fn run_authenticated_responder_over_with_accept<W: Write, R: BufRead>(
+    writer: W,
+    reader: R,
+    local_identity: LocalIdentity,
+    trust_store: Arc<TrustStore>,
+    receive_dir: impl AsRef<Path>,
+    on_file_received: Option<FileReceivedCallback>,
+    on_accept: Option<AcceptPeerCallback>,
+) -> io::Result<()> {
+    run_authenticated_session_over(
+        writer,
+        reader,
+        local_identity,
+        trust_store,
+        receive_dir.as_ref().to_path_buf(),
+        on_file_received,
+        on_accept,
     )
 }
 

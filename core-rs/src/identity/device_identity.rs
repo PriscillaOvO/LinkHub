@@ -17,8 +17,9 @@ use super::secure_store::{
     protect_local_identity_bytes, unprotect_local_identity_bytes,
 };
 use super::{
-    decode_hex, decode_hex_string, encode_hex, grouped_uppercase, handshake_challenge, sha256_hex,
-    signaling_sdp_message, system_time_to_unix_seconds, LOCAL_IDENTITY_HEADER,
+    decode_hex, decode_hex_string, encode_hex, grouped_uppercase, handshake_challenge,
+    identity_binding_message, sha256_hex, signaling_sdp_message, system_time_to_unix_seconds,
+    LOCAL_IDENTITY_HEADER,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,6 +64,31 @@ impl DeviceIdentity {
     pub fn fingerprint(&self) -> String {
         let digest = sha256_hex(format!("{}\0{}", self.device_id, self.public_key).as_bytes());
         grouped_uppercase(&digest[..16], 4)
+    }
+
+    /// Whether `device_id` is the stable hash of `public_key` (the binding every
+    /// honest identity satisfies, since `device_id = "lh-" + sha256(public_key)`).
+    /// A wire-transmitted identity claiming a `device_id` that does not derive
+    /// from its own Ed25519 key must be rejected before it is trusted.
+    pub fn has_consistent_device_id(&self) -> bool {
+        stable_device_id(&self.public_key) == self.device_id
+    }
+
+    /// Verify a first-contact identity-binding signature (see
+    /// [`super::identity_binding_message`]): that this identity's Ed25519 key
+    /// vouches for its X25519 `dh_public_key`. Combined with
+    /// [`Self::has_consistent_device_id`] and the handshake challenge/response,
+    /// this lets a peer accept the wire-transmitted DH key for a Noise KK session
+    /// without prior pairing and without an active MITM being able to swap it.
+    pub fn verify_identity_binding(&self, signature_hex: &str) -> Result<bool, String> {
+        let public_key_bytes = hex_array::<32>(self.public_key())?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&public_key_bytes).map_err(|err| err.to_string())?;
+        let signature_bytes = decode_hex(signature_hex)?;
+        let signature = Signature::from_slice(&signature_bytes).map_err(|err| err.to_string())?;
+        let message = identity_binding_message(self.device_id(), self.dh_public_key());
+
+        Ok(verifying_key.verify(&message, &signature).is_ok())
     }
 
     pub fn verify_handshake_signature(
@@ -278,6 +304,20 @@ impl LocalIdentity {
         Ok(encode_hex(&signature.to_bytes()))
     }
 
+    /// Sign this device's own static-key binding (Ed25519 over
+    /// `device_id` + X25519 `dh_public_key`, see [`super::identity_binding_message`])
+    /// so a peer accepting us at first contact can trust our wire-transmitted DH
+    /// key. Domain-separated from handshake/login/SDP signatures. Pairs with
+    /// [`DeviceIdentity::verify_identity_binding`].
+    pub fn sign_identity_binding(&self) -> Result<String, String> {
+        let signing_key_bytes = hex_array::<32>(&self.signing_key_hex)?;
+        let signing_key = SigningKey::from_bytes(&signing_key_bytes);
+        let message = identity_binding_message(self.device_id(), self.dh_public_key());
+        let signature = signing_key.sign(&message);
+
+        Ok(encode_hex(&signature.to_bytes()))
+    }
+
     /// Sign a WebRTC SDP signal (offer/answer) with this device's identity key so
     /// the receiving peer can detect a signaling server tampering with or
     /// substituting the SDP it forwards (connection-redirection, design §7).
@@ -409,4 +449,52 @@ fn parse_local_identity(value: &str) -> Result<LocalIdentity, String> {
     }
 
     Ok(expected)
+}
+
+#[cfg(test)]
+mod first_contact_binding_tests {
+    //! The crypto that makes AirDrop-style first contact safe without pairing:
+    //! a device's Ed25519 key signs its X25519 DH key, and its device_id is the
+    //! hash of its Ed25519 key — so a wire-transmitted identity cannot be forged
+    //! or have its DH key swapped by an active MITM.
+
+    use super::*;
+
+    #[test]
+    fn identity_binding_round_trips_and_rejects_dh_swap() {
+        let now = SystemTime::now();
+        let alice = LocalIdentity::generate("Alice", now);
+        let mallory = LocalIdentity::generate("Mallory", now);
+
+        let sig = alice.sign_identity_binding().unwrap();
+
+        // Alice's own identity verifies the binding she signed.
+        assert!(alice.identity().verify_identity_binding(&sig).unwrap());
+
+        // Alice's device_id + Ed25519 key but Mallory's DH key swapped in must
+        // FAIL the binding check — this is the man-in-the-middle defense.
+        let swapped = DeviceIdentity::new(
+            alice.device_id(),
+            alice.device_name(),
+            alice.public_key(),
+            mallory.dh_public_key(),
+        );
+        assert!(!swapped.verify_identity_binding(&sig).unwrap());
+    }
+
+    #[test]
+    fn detects_inconsistent_device_id() {
+        let now = SystemTime::now();
+        let alice = LocalIdentity::generate("Alice", now);
+        assert!(alice.identity().has_consistent_device_id());
+
+        // A forged identity claiming a device_id not derived from its own key.
+        let forged = DeviceIdentity::new(
+            "lh-0000000000000000",
+            alice.device_name(),
+            alice.public_key(),
+            alice.dh_public_key(),
+        );
+        assert!(!forged.has_consistent_device_id());
+    }
 }
