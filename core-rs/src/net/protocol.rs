@@ -29,6 +29,13 @@ pub(in crate::net) enum WireMessage {
         public_key: String,
         dh_public_key: String,
         binding_sig: String,
+        /// The sender's stable v3 `.onion` address (derived from its identity),
+        /// so an accepting peer can store it and later reconnect over Tor with no
+        /// signaling server. Optional + trailing for wire compatibility: v1 peers
+        /// omit it and are parsed with `None`. Advisory only — it is never the
+        /// security boundary (a lie just points the dialer at a wrong onion where
+        /// Noise KK fails closed), so it rides outside the binding signature.
+        onion_address: Option<String>,
     },
     Heartbeat(HeartbeatUpdate),
     Text {
@@ -155,6 +162,7 @@ impl WireMessage {
         public_key: &str,
         dh_public_key: &str,
         binding_sig: &str,
+        onion_address: Option<&str>,
     ) -> Self {
         WireMessage::Identity {
             device_id: sanitize_field(device_id),
@@ -162,6 +170,9 @@ impl WireMessage {
             public_key: sanitize_field(public_key),
             dh_public_key: sanitize_field(dh_public_key),
             binding_sig: sanitize_field(binding_sig),
+            onion_address: onion_address
+                .map(sanitize_field)
+                .filter(|address| !address.is_empty()),
         }
     }
 
@@ -340,9 +351,16 @@ pub(in crate::net) fn serialize_message(message: &WireMessage) -> String {
             public_key,
             dh_public_key,
             binding_sig,
-        } => format!(
-            "IDENTITY\t{device_id}\t{device_name}\t{public_key}\t{dh_public_key}\t{binding_sig}"
-        ),
+            onion_address,
+        } => {
+            let base = format!(
+                "IDENTITY\t{device_id}\t{device_name}\t{public_key}\t{dh_public_key}\t{binding_sig}"
+            );
+            match onion_address {
+                Some(onion_address) => format!("{base}\t{onion_address}"),
+                None => base,
+            }
+        }
         WireMessage::Heartbeat(update) => format!(
             "HEARTBEAT\t{}\t{}\t{}\t{}\t{}",
             update.transport,
@@ -461,6 +479,23 @@ pub(in crate::net) fn parse_message(line: &str) -> Result<WireMessage, String> {
                 public_key: (*public_key).to_string(),
                 dh_public_key: (*dh_public_key).to_string(),
                 binding_sig: (*binding_sig).to_string(),
+                onion_address: None,
+            })
+        }
+        ["IDENTITY", device_id, device_name, public_key, dh_public_key, binding_sig, onion_address]
+            if !device_id.is_empty()
+                && !public_key.is_empty()
+                && !dh_public_key.is_empty()
+                && !binding_sig.is_empty()
+                && !onion_address.is_empty() =>
+        {
+            Ok(WireMessage::Identity {
+                device_id: (*device_id).to_string(),
+                device_name: (*device_name).to_string(),
+                public_key: (*public_key).to_string(),
+                dh_public_key: (*dh_public_key).to_string(),
+                binding_sig: (*binding_sig).to_string(),
+                onion_address: Some((*onion_address).to_string()),
             })
         }
         ["HEARTBEAT", transport, latency_ms, bandwidth_score, battery_cost, metered_cost] => {
@@ -787,8 +822,14 @@ mod tests {
 
     #[test]
     fn round_trips_identity_message() {
-        let message =
-            WireMessage::identity("lh-abcdef0123456789", "Alice Phone", "aa11", "bb22", "cc33");
+        let message = WireMessage::identity(
+            "lh-abcdef0123456789",
+            "Alice Phone",
+            "aa11",
+            "bb22",
+            "cc33",
+            None,
+        );
         let line = serialize_message(&message);
 
         assert_eq!(
@@ -799,11 +840,53 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_identity_message_with_onion_address() {
+        let onion = "aaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5dyp3kead.onion";
+        let message = WireMessage::identity(
+            "lh-abcdef0123456789",
+            "Alice Phone",
+            "aa11",
+            "bb22",
+            "cc33",
+            Some(onion),
+        );
+        let line = serialize_message(&message);
+
+        assert_eq!(
+            line,
+            format!("IDENTITY\tlh-abcdef0123456789\tAlice Phone\taa11\tbb22\tcc33\t{onion}")
+        );
+        assert_eq!(parse_message(&line).unwrap(), message);
+    }
+
+    #[test]
+    fn parses_legacy_identity_message_without_onion_as_none() {
+        // A v1 peer that predates the onion field sends the 6-field form; it must
+        // still parse, with `onion_address` defaulting to `None`.
+        let parsed = parse_message("IDENTITY\tlh-x\tName\taa\tbb\tcc").unwrap();
+
+        assert_eq!(
+            parsed,
+            WireMessage::Identity {
+                device_id: "lh-x".to_string(),
+                device_name: "Name".to_string(),
+                public_key: "aa".to_string(),
+                dh_public_key: "bb".to_string(),
+                binding_sig: "cc".to_string(),
+                onion_address: None,
+            }
+        );
+    }
+
+    #[test]
     fn rejects_identity_message_missing_fields() {
         // Empty binding signature must be rejected.
         assert!(parse_message("IDENTITY\tlh-x\tName\taa\tbb\t").is_err());
         // Empty dh public key must be rejected.
         assert!(parse_message("IDENTITY\tlh-x\tName\taa\t\tcc").is_err());
+        // Present-but-empty trailing onion field must be rejected (not treated as
+        // a 7-field message); the 6-field legacy form is the only no-onion shape.
+        assert!(parse_message("IDENTITY\tlh-x\tName\taa\tbb\tcc\t").is_err());
     }
 
     #[test]

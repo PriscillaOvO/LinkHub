@@ -695,7 +695,7 @@ fn resolve_first_contact_identity<W: Write, R: BufRead>(
         ));
     }
 
-    let (device_id, device_name, public_key, dh_public_key, binding_sig) =
+    let (device_id, device_name, public_key, dh_public_key, binding_sig, onion_address) =
         match parse_message(line.trim_end()) {
             Ok(WireMessage::Identity {
                 device_id,
@@ -703,12 +703,14 @@ fn resolve_first_contact_identity<W: Write, R: BufRead>(
                 public_key,
                 dh_public_key,
                 binding_sig,
+                onion_address,
             }) => (
                 device_id,
                 device_name,
                 public_key,
                 dh_public_key,
                 binding_sig,
+                onion_address,
             ),
             Ok(message) => {
                 return Err(io::Error::new(
@@ -731,7 +733,8 @@ fn resolve_first_contact_identity<W: Write, R: BufRead>(
         device_name.clone(),
         public_key.clone(),
         dh_public_key.clone(),
-    );
+    )
+    .with_onion_address(onion_address.clone());
 
     // The claimed device_id must be the stable hash of the presented Ed25519 key.
     if !identity.has_consistent_device_id() {
@@ -762,6 +765,7 @@ fn resolve_first_contact_identity<W: Write, R: BufRead>(
         public_key,
         dh_public_key,
         fingerprint,
+        onion_address,
     });
 
     if !accepted {
@@ -916,6 +920,12 @@ fn wait_for_auth_challenge<W: Write, R: BufRead>(
                 let binding_sig = local_identity
                     .sign_identity_binding()
                     .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+                // Advertise our stable .onion so the accepting peer can store it
+                // and later reconnect us over Tor with no signaling server. It is
+                // a public address derived from our identity; best-effort (an
+                // address derivation failure simply omits it, leaving Tor reconnect
+                // unavailable for this peer until a later handshake supplies it).
+                let onion_address = local_identity.onion_address().ok();
                 write_message(
                     writer,
                     &WireMessage::identity(
@@ -924,6 +934,7 @@ fn wait_for_auth_challenge<W: Write, R: BufRead>(
                         local_identity.public_key(),
                         local_identity.dh_public_key(),
                         &binding_sig,
+                        onion_address.as_deref(),
                     ),
                 )?;
                 continue;

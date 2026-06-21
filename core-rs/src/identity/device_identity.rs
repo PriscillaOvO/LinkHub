@@ -29,6 +29,7 @@ pub struct DeviceIdentity {
     device_name: String,
     public_key: String,
     dh_public_key: String,
+    onion_address: Option<String>,
 }
 
 impl DeviceIdentity {
@@ -43,11 +44,33 @@ impl DeviceIdentity {
             device_name: device_name.into(),
             public_key: public_key.into(),
             dh_public_key: dh_public_key.into(),
+            onion_address: None,
         }
+    }
+
+    /// Attach a peer's advertised v3 `.onion` address (learned in the identity
+    /// exchange and persisted in the trust store) so it can later be reconnected
+    /// over Tor with no signaling server. Whitespace-only / empty becomes `None`.
+    /// Advisory only: the address is never re-derivable from the peer's public key
+    /// (it comes from the peer's secret hidden-service seed), so it cannot be
+    /// verified here — but a forged address merely points a dialer at the wrong
+    /// onion, where the Noise KK handshake fails closed. The real authentication
+    /// stays the static-key Noise KK session, never this field.
+    pub fn with_onion_address(mut self, onion_address: Option<String>) -> Self {
+        self.onion_address = onion_address
+            .map(|address| address.trim().to_string())
+            .filter(|address| !address.is_empty());
+        self
     }
 
     pub fn device_id(&self) -> &str {
         &self.device_id
+    }
+
+    /// The peer's stored v3 `.onion` address, if one was exchanged. See
+    /// [`Self::with_onion_address`].
+    pub fn onion_address(&self) -> Option<&str> {
+        self.onion_address.as_deref()
     }
 
     pub fn device_name(&self) -> &str {
@@ -549,5 +572,27 @@ mod onion_address_tests {
         let a = LocalIdentity::from_keys("PC", [7u8; 32], [0u8; 32], now);
         let b = LocalIdentity::from_keys("PC", [9u8; 32], [0u8; 32], now);
         assert_ne!(a.onion_address().unwrap(), b.onion_address().unwrap());
+    }
+
+    #[test]
+    fn device_identity_with_onion_address_trims_and_drops_empty() {
+        let base = DeviceIdentity::new("lh-x", "Name", "aa", "bb");
+        assert_eq!(base.onion_address(), None);
+
+        // Whitespace-only is normalized away to `None`.
+        assert_eq!(
+            base.clone()
+                .with_onion_address(Some("   ".to_string()))
+                .onion_address(),
+            None
+        );
+
+        // A real address is trimmed and stored.
+        let onion = "aaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5dyp3kead.onion";
+        assert_eq!(
+            base.with_onion_address(Some(format!("  {onion}  ")))
+                .onion_address(),
+            Some(onion)
+        );
     }
 }

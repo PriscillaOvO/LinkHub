@@ -81,13 +81,18 @@ pub struct IncomingPeer {
     pub public_key: String,
     pub dh_public_key: String,
     pub fingerprint: String,
+    /// The peer's advertised v3 `.onion` address, if it sent one. `None` for v1
+    /// peers. Persist it alongside the device (via `DeviceIdentity::with_onion_address`)
+    /// so the peer can later be reconnected over Tor with no signaling server.
+    pub onion_address: Option<String>,
 }
 
 /// Decides whether to accept a first-contact peer. Runs on the per-session
 /// worker thread and **blocks the handshake** until it returns, so a UI shell
 /// can show an accept/reject prompt. Returning `true` should also persist the
-/// device to the trust store (build it from the `public_key`/`dh_public_key` in
-/// [`IncomingPeer`]) so subsequent connections from it are silent.
+/// device to the trust store (build it from the `public_key`/`dh_public_key` and
+/// `onion_address` in [`IncomingPeer`]) so subsequent connections from it are
+/// silent and Tor reconnect is available.
 pub type AcceptPeerCallback = Arc<dyn Fn(IncomingPeer) -> bool + Send + Sync>;
 
 pub fn run_authenticated_listener_on(

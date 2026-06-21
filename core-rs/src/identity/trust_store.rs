@@ -70,14 +70,22 @@ fn format_trust_store(store: &TrustStore) -> String {
     let mut lines = vec![TRUST_STORE_HEADER.to_string()];
 
     for device in store.trusted_devices() {
-        lines.push(format!(
+        let base = format!(
             "device={}|{}|{}|{}|{}",
             encode_hex(device.device_id().as_bytes()),
             encode_hex(device.device_name().as_bytes()),
             encode_hex(device.identity().public_key().as_bytes()),
             encode_hex(device.identity().dh_public_key().as_bytes()),
             system_time_to_unix_seconds(device.paired_at())
-        ));
+        );
+        // The onion address is only appended (as a 6th field) when known, so
+        // records for peers without one stay byte-identical to the v1 format.
+        match device.identity().onion_address() {
+            Some(onion_address) => {
+                lines.push(format!("{base}|{}", encode_hex(onion_address.as_bytes())))
+            }
+            None => lines.push(base),
+        }
     }
 
     lines.push(String::new());
@@ -109,10 +117,11 @@ fn parse_trust_store(value: &str) -> Result<TrustStore, String> {
         };
         let fields = record.split('|').collect::<Vec<_>>();
 
-        if fields.len() != 5 {
+        // 5 fields = v1 record (no onion); 6 = with the trailing onion address.
+        if fields.len() != 5 && fields.len() != 6 {
             return Err(format!(
-                "invalid trust store device field count ({}) on line {line_number}; \
-                 expected 5 fields (device_id, device_name, public_key, dh_public_key, paired_at)",
+                "invalid trust store device field count ({}) on line {line_number}; expected 5 or \
+                 6 fields (device_id, device_name, public_key, dh_public_key, paired_at[, onion])",
                 fields.len()
             ));
         }
@@ -128,9 +137,18 @@ fn parse_trust_store(value: &str) -> Result<TrustStore, String> {
         let paired_at_seconds = fields[4]
             .parse::<u64>()
             .map_err(|_| format!("invalid paired_at timestamp on line {line_number}"))?;
+        let onion_address = match fields.get(5) {
+            Some(onion_hex) => {
+                let onion = decode_hex_string(onion_hex)
+                    .map_err(|err| format!("invalid onion_address on line {line_number}: {err}"))?;
+                Some(onion).filter(|address| !address.trim().is_empty())
+            }
+            None => None,
+        };
 
         store.trust(TrustedDevice::new(
-            DeviceIdentity::new(device_id, device_name, public_key, dh_public_key),
+            DeviceIdentity::new(device_id, device_name, public_key, dh_public_key)
+                .with_onion_address(onion_address),
             UNIX_EPOCH + Duration::from_secs(paired_at_seconds),
         ));
     }

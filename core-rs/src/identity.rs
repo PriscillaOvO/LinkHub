@@ -485,6 +485,73 @@ mod tests {
     }
 
     #[test]
+    fn trust_store_round_trips_peer_onion_address() {
+        let path = std::env::temp_dir().join(format!(
+            "linkhub-trust-onion-{}.txt",
+            sha256_hex(format!("{:?}", SystemTime::now()).as_bytes())
+        ));
+        let onion = "aaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5dyp3kead.onion";
+        let mut store = TrustStore::new();
+        store.trust(TrustedDevice::new(
+            identity("phone-001", "Android Phone", "phone-public-key")
+                .with_onion_address(Some(onion.to_string())),
+            SystemTime::UNIX_EPOCH,
+        ));
+        // A peer without an onion stays None across the round trip (5-field form).
+        store.trust(TrustedDevice::new(
+            identity("ipad-001", "iPad Pro", "ipad-public-key"),
+            SystemTime::UNIX_EPOCH,
+        ));
+
+        store.save_to_path(&path).unwrap();
+        let loaded = TrustStore::load_from_path(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            loaded
+                .trusted_device("phone-001")
+                .unwrap()
+                .identity()
+                .onion_address(),
+            Some(onion)
+        );
+        assert_eq!(
+            loaded
+                .trusted_device("ipad-001")
+                .unwrap()
+                .identity()
+                .onion_address(),
+            None
+        );
+    }
+
+    #[test]
+    fn trust_store_loads_legacy_five_field_record_without_onion() {
+        // A pre-onion record (5 pipe fields) must still load, with onion `None`.
+        let path = std::env::temp_dir().join(format!(
+            "linkhub-trust-legacy-{}.txt",
+            sha256_hex(format!("{:?}", SystemTime::now()).as_bytes())
+        ));
+        fs::write(
+            &path,
+            "linkhub_trust_store_v1\ndevice=70686f6e652d303031|416e64726f69642050686f6e65|70686f6e652d7075626c69632d6b6579|0000000000000000000000000000000000000000000000000000000000000000|0\n",
+        )
+        .unwrap();
+
+        let store = TrustStore::load_from_path(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            store
+                .trusted_device("phone-001")
+                .unwrap()
+                .identity()
+                .onion_address(),
+            None
+        );
+    }
+
+    #[test]
     fn trust_store_loads_missing_file_as_empty_store() {
         let path = std::env::temp_dir().join(format!(
             "linkhub-missing-trust-store-{}.txt",

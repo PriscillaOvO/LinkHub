@@ -144,6 +144,9 @@ struct IncomingPeerPromptPayload {
     public_key: String,
     dh_public_key: String,
     fingerprint: String,
+    // The peer's advertised .onion (if any), carried through so it is persisted
+    // with the device on accept, enabling later Tor reconnect with no signaling.
+    onion_address: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -294,6 +297,7 @@ fn prompt_payload_from_peer(request_id: u64, peer: &IncomingPeer) -> IncomingPee
         public_key: peer.public_key.clone(),
         dh_public_key: peer.dh_public_key.clone(),
         fingerprint: peer.fingerprint.clone(),
+        onion_address: peer.onion_address.clone(),
     }
 }
 
@@ -304,6 +308,7 @@ fn identity_from_prompt_payload(payload: &IncomingPeerPromptPayload) -> DeviceId
         payload.public_key.clone(),
         payload.dh_public_key.clone(),
     )
+    .with_onion_address(payload.onion_address.clone())
 }
 
 fn trust_incoming_peer(
