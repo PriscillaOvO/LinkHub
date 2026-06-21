@@ -129,7 +129,7 @@ fn endpoints_from_resolved_service(
 }
 
 fn txt_records_from_resolved(info: &ResolvedService) -> Vec<String> {
-    ["lh", "id", "name", "fp", "port", "pk", "dh", "sig"]
+    ["lh", "id", "name", "fp", "port", "pk", "dh", "sig", "onion"]
         .into_iter()
         .filter_map(|key| {
             info.get_property_val_str(key)
@@ -161,6 +161,7 @@ fn endpoint_with_srv_port(
         advertisement.dh_public_key().to_string(),
         advertisement.binding_sig().to_string(),
     )
+    .with_onion_address(advertisement.onion_address().to_string())
 }
 
 #[cfg(test)]

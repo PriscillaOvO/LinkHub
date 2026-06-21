@@ -16,6 +16,7 @@ pub struct DiscoveryEndpoint {
     public_key: String,
     dh_public_key: String,
     binding_sig: String,
+    onion_address: String,
     transport: TransportKind,
     discovered_at: Instant,
 }
@@ -35,6 +36,7 @@ impl DiscoveryEndpoint {
             public_key: String::new(),
             dh_public_key: String::new(),
             binding_sig: String::new(),
+            onion_address: String::new(),
             transport,
             discovered_at,
         }
@@ -79,6 +81,13 @@ impl DiscoveryEndpoint {
         &self.binding_sig
     }
 
+    /// The peer's advertised v3 `.onion` address, or `""` if it did not include
+    /// one in its mDNS TXT record. Lets a device store a LAN-sighted peer's onion
+    /// so it can later be reconnected over Tor once they are on different networks.
+    pub fn onion_address(&self) -> &str {
+        &self.onion_address
+    }
+
     pub fn with_identity_binding(
         mut self,
         public_key: impl Into<String>,
@@ -88,6 +97,11 @@ impl DiscoveryEndpoint {
         self.public_key = public_key.into();
         self.dh_public_key = dh_public_key.into();
         self.binding_sig = binding_sig.into();
+        self
+    }
+
+    pub fn with_onion_address(mut self, onion_address: impl Into<String>) -> Self {
+        self.onion_address = onion_address.into();
         self
     }
 
@@ -112,6 +126,7 @@ pub struct MdnsAdvertisement {
     public_key: String,
     dh_public_key: String,
     binding_sig: String,
+    onion_address: String,
     port: u16,
 }
 
@@ -124,6 +139,7 @@ impl MdnsAdvertisement {
             public_key: identity.public_key().to_string(),
             dh_public_key: identity.dh_public_key().to_string(),
             binding_sig: String::new(),
+            onion_address: identity.onion_address().unwrap_or_default().to_string(),
             port,
         }
     }
@@ -131,6 +147,9 @@ impl MdnsAdvertisement {
     pub fn from_local_identity(identity: &crate::identity::LocalIdentity, port: u16) -> Self {
         let mut advertisement = Self::from_identity(identity.identity(), port);
         advertisement.binding_sig = identity.sign_identity_binding().unwrap_or_default();
+        // The local device derives its own onion from its signing key; the
+        // embedded DeviceIdentity does not carry it, so fill it in here.
+        advertisement.onion_address = identity.onion_address().ok().unwrap_or_default();
         advertisement
     }
 
@@ -162,6 +181,10 @@ impl MdnsAdvertisement {
         &self.binding_sig
     }
 
+    pub fn onion_address(&self) -> &str {
+        &self.onion_address
+    }
+
     pub fn instance_name(&self) -> String {
         format!(
             "{}-{}",
@@ -187,6 +210,9 @@ impl MdnsAdvertisement {
         if !self.binding_sig.is_empty() {
             records.push(format!("sig={}", self.binding_sig));
         }
+        if !self.onion_address.is_empty() {
+            records.push(format!("onion={}", self.onion_address));
+        }
         records
     }
 
@@ -203,6 +229,9 @@ impl MdnsAdvertisement {
         .into();
         if !self.binding_sig.is_empty() {
             map.insert("sig".to_string(), self.binding_sig.clone());
+        }
+        if !self.onion_address.is_empty() {
+            map.insert("onion".to_string(), self.onion_address.clone());
         }
         map
     }
@@ -229,6 +258,7 @@ impl MdnsAdvertisement {
             public_key: fields.get("pk").copied().unwrap_or_default().to_string(),
             dh_public_key: fields.get("dh").copied().unwrap_or_default().to_string(),
             binding_sig: fields.get("sig").copied().unwrap_or_default().to_string(),
+            onion_address: fields.get("onion").copied().unwrap_or_default().to_string(),
             port,
         })
     }
@@ -245,6 +275,7 @@ impl MdnsAdvertisement {
             self.dh_public_key.clone(),
             self.binding_sig.clone(),
         )
+        .with_onion_address(self.onion_address.clone())
     }
 }
 
@@ -403,6 +434,46 @@ mod tests {
         assert_eq!(endpoint.dh_public_key(), "00".repeat(32));
         assert_eq!(endpoint.transport(), TransportKind::LanTcp);
         assert_eq!(endpoint.discovered_at(), now);
+    }
+
+    #[test]
+    fn mdns_advertisement_carries_onion_address_through_txt_and_endpoint() {
+        let onion = "aaaqeayeaudaocajbifqydiob4ibceqtcqkrmfyydenbwha5dyp3kead.onion";
+        let identity = DeviceIdentity::new(
+            "phone-001",
+            "Android Phone",
+            "phone-public-key",
+            "00".repeat(32),
+        )
+        .with_onion_address(Some(onion.to_string()));
+        let advertisement = MdnsAdvertisement::from_identity(&identity, 8787);
+
+        assert_eq!(advertisement.onion_address(), onion);
+        assert!(advertisement
+            .txt_records()
+            .contains(&format!("onion={onion}")));
+
+        // TXT round-trips (including onion) and the endpoint carries it onward so a
+        // LAN-sighted peer's onion can be stored for later cross-network reconnect.
+        let parsed = MdnsAdvertisement::from_txt_records(&advertisement.txt_records()).unwrap();
+        assert_eq!(parsed, advertisement);
+
+        let endpoint = parsed.to_endpoint(IpAddr::from([192, 168, 1, 20]), Instant::now());
+        assert_eq!(endpoint.onion_address(), onion);
+    }
+
+    #[test]
+    fn mdns_advertisement_without_onion_omits_txt_field() {
+        let advertisement = MdnsAdvertisement::from_identity(&identity(), 8787);
+
+        assert_eq!(advertisement.onion_address(), "");
+        assert!(advertisement
+            .txt_records()
+            .iter()
+            .all(|record| !record.starts_with("onion=")));
+
+        let endpoint = advertisement.to_endpoint(IpAddr::from([127, 0, 0, 1]), Instant::now());
+        assert_eq!(endpoint.onion_address(), "");
     }
 
     #[test]
