@@ -17,14 +17,26 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.QrCodeScanner
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.linkhub.app.bridge.RustBridge
 import com.linkhub.app.ui.DevicesScreen
@@ -156,40 +168,58 @@ fun LinkHubMain(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("LinkHub") },
+                title = {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        // CSS-free brand mark: a small indigo→violet gradient tile,
+                        // matching the desktop shell so the two clients read as one.
+                        Box(
+                            modifier = Modifier
+                                .size(28.dp)
+                                .clip(RoundedCornerShape(9.dp))
+                                .background(
+                                    Brush.linearGradient(listOf(BrandIndigoLight, BrandViolet))
+                                )
+                        )
+                        Text("LinkHub", fontWeight = FontWeight.Bold)
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    titleContentColor = MaterialTheme.colorScheme.onSurface
                 )
             )
         },
         bottomBar = {
             NavigationBar {
                 NavigationBarItem(
-                    icon = { Text("📷") },
+                    icon = { Icon(Icons.Filled.QrCodeScanner, contentDescription = null) },
                     label = { Text("配对") },
                     selected = currentTab == Tab.Pair,
                     onClick = { currentTab = Tab.Pair }
                 )
                 NavigationBarItem(
-                    icon = { Text("💻") },
+                    icon = { Icon(Icons.Filled.Devices, contentDescription = null) },
                     label = { Text("设备") },
                     selected = currentTab == Tab.Devices,
                     onClick = { currentTab = Tab.Devices }
                 )
                 NavigationBarItem(
-                    icon = { Text("📤") },
+                    icon = { Icon(Icons.Filled.Send, contentDescription = null) },
                     label = { Text("发送") },
                     selected = currentTab == Tab.Send,
                     onClick = { currentTab = Tab.Send }
                 )
                 NavigationBarItem(
-                    icon = { Text("🧾") },
+                    icon = { Icon(Icons.Filled.History, contentDescription = null) },
                     label = { Text("历史") },
                     selected = currentTab == Tab.History,
                     onClick = { currentTab = Tab.History }
                 )
                 NavigationBarItem(
-                    icon = { Text("⚙") },
+                    icon = { Icon(Icons.Filled.Tune, contentDescription = null) },
                     label = { Text("服务") },
                     selected = currentTab == Tab.Service,
                     onClick = { currentTab = Tab.Service }

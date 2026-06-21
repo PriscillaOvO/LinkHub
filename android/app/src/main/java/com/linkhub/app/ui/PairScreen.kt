@@ -16,6 +16,7 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
@@ -27,6 +28,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
@@ -124,135 +126,162 @@ fun PairScreen() {
 
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text("本机身份", style = MaterialTheme.typography.titleMedium)
-        OutlinedTextField(value = deviceName, onValueChange = { deviceName = it },
-            label = { Text("设备名称") }, modifier = Modifier.fillMaxWidth())
-        Button(onClick = {
-            val json = RustBridge.generateIdentity(deviceName)
-            val id = try { gson.fromJson(json, IdentityJson::class.java) } catch (_: Exception) { null }
-            if (id != null) {
-                identity = id
-                saveIdentity(ctx, json)
-                statusMsg = "身份已保存: ${id.deviceId}"
-            } else {
-                statusMsg = "创建失败"
-            }
-        }) { Text("生成身份") }
-
-        if (identity != null) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("ID: ${identity!!.deviceId}", style = MaterialTheme.typography.bodySmall)
-                    Text("指纹: ${identity!!.fingerprint}", style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+        SectionCard("本机身份") {
+            OutlinedTextField(value = deviceName, onValueChange = { deviceName = it },
+                label = { Text("设备名称") }, modifier = Modifier.fillMaxWidth())
+            Button(onClick = {
+                val json = RustBridge.generateIdentity(deviceName)
+                val id = try { gson.fromJson(json, IdentityJson::class.java) } catch (_: Exception) { null }
+                if (id != null) {
+                    identity = id
+                    saveIdentity(ctx, json)
+                    statusMsg = "身份已保存: ${id.deviceId}"
+                } else {
+                    statusMsg = "创建失败"
                 }
-                CopyButton(identity!!.deviceId, "设备ID")
-            }
-        }
+            }) { Text("生成身份") }
 
-        Divider()
-
-        Text("生成配对码", style = MaterialTheme.typography.titleMedium)
-        Button(onClick = {
             if (identity != null) {
-                myPayload = RustBridge.generatePairingPayload(gson.toJson(identity), 120)
-                statusMsg = "配对码已生成 (有效期120秒)"
-            }
-        }, enabled = identity != null) { Text("生成配对码") }
-
-        if (myPayload.isNotEmpty()) {
-            PairingQrCode(myPayload)
-            OutlinedTextField(value = myPayload, onValueChange = {},
-                label = { Text("配对码 (发给对方)") }, modifier = Modifier.fillMaxWidth(),
-                readOnly = true, maxLines = 3)
-            Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                TextButton(onClick = { copyToClipboard(ctx, "配对码", myPayload) }) { Text("📋 复制配对码") }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("ID: ${identity!!.deviceId}", style = MaterialTheme.typography.bodySmall)
+                        Text("指纹: ${identity!!.fingerprint}", style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace)
+                    }
+                    CopyButton(identity!!.deviceId, "设备ID")
+                }
             }
         }
 
-        Divider()
+        SectionCard("生成配对码") {
+            Button(onClick = {
+                if (identity != null) {
+                    myPayload = RustBridge.generatePairingPayload(gson.toJson(identity), 120)
+                    statusMsg = "配对码已生成 (有效期120秒)"
+                }
+            }, enabled = identity != null) { Text("生成配对码") }
 
-        Text("扫描对方", style = MaterialTheme.typography.titleMedium)
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            Button(
-                onClick = {
-                    if (cameraGranted) {
-                        scannerOpen = true
-                        statusMsg = "请扫描对方的 LinkHub 配对二维码"
-                    } else {
-                        cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+            if (myPayload.isNotEmpty()) {
+                PairingQrCode(myPayload)
+                OutlinedTextField(value = myPayload, onValueChange = {},
+                    label = { Text("配对码 (发给对方)") }, modifier = Modifier.fillMaxWidth(),
+                    readOnly = true, maxLines = 3)
+                Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
+                    TextButton(onClick = { copyToClipboard(ctx, "配对码", myPayload) }) { Text("📋 复制配对码") }
+                }
+            }
+        }
+
+        SectionCard("扫描对方") {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+                Button(
+                    onClick = {
+                        if (cameraGranted) {
+                            scannerOpen = true
+                            statusMsg = "请扫描对方的 LinkHub 配对二维码"
+                        } else {
+                            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                        }
+                    },
+                    enabled = identity != null
+                ) {
+                    Text("扫码导入配对码")
+                }
+                if (scannerOpen) {
+                    TextButton(onClick = { scannerOpen = false }) {
+                        Text("关闭扫码")
                     }
-                },
-                enabled = identity != null
-            ) {
-                Text("扫码导入配对码")
+                }
             }
             if (scannerOpen) {
-                TextButton(onClick = { scannerOpen = false }) {
-                    Text("关闭扫码")
-                }
+                PairingPayloadScanner(
+                    onPayload = { payload ->
+                        peerPayload = payload
+                        scannerOpen = false
+                        inspectPeerPayload(payload)
+                    },
+                    onInvalid = { statusMsg = "不是 LinkHub 配对码，请继续扫描" },
+                    onError = { statusMsg = "扫码失败: $it" }
+                )
             }
-        }
-        if (scannerOpen) {
-            PairingPayloadScanner(
-                onPayload = { payload ->
-                    peerPayload = payload
-                    scannerOpen = false
-                    inspectPeerPayload(payload)
-                },
-                onInvalid = { statusMsg = "不是 LinkHub 配对码，请继续扫描" },
-                onError = { statusMsg = "扫码失败: $it" }
-            )
-        }
-        OutlinedTextField(value = peerPayload, onValueChange = { peerPayload = it },
-            label = { Text("粘贴对方的配对码") }, modifier = Modifier.fillMaxWidth(), maxLines = 2)
-        Button(onClick = {
-            inspectPeerPayload(peerPayload)
-        }, enabled = identity != null && peerPayload.isNotEmpty()) { Text("查看对方信息") }
-
-        if (peerInfo != null) {
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text("设备: ${peerInfo!!.deviceName}", style = MaterialTheme.typography.titleSmall)
-                    Text("ID: ${peerInfo!!.deviceId}")
-                    Text("指纹: ${peerInfo!!.fingerprint}", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("确认码: ${peerInfo!!.confirmationCode}",
-                            style = MaterialTheme.typography.headlineMedium,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.weight(1f))
-                        CopyButton(peerInfo!!.confirmationCode, "确认码")
-                    }
-                }
-            }
-            OutlinedTextField(value = confirmationInput, onValueChange = { confirmationInput = it },
-                label = { Text("输入确认码") }, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value = peerPayload, onValueChange = { peerPayload = it },
+                label = { Text("粘贴对方的配对码") }, modifier = Modifier.fillMaxWidth(), maxLines = 2)
             Button(onClick = {
-                if (identity != null && peerPayload.isNotEmpty() && confirmationInput.isNotEmpty()) {
-                    val json = RustBridge.confirmPairing(gson.toJson(identity), peerPayload, confirmationInput)
-                    pairResult = try { gson.fromJson(json, PairResultJson::class.java) } catch (_: Exception) { null }
-                    if (pairResult?.success == true) {
-                        // Save peer to trusted list for Send page auto-fill
-                        saveTrustedPeer(
-                            ctx,
-                            peerInfo!!.deviceId,
-                            peerInfo!!.deviceName,
-                            peerInfo!!.fingerprint,
-                            peerPayload
-                        )
-                        statusMsg = "已信任: ${pairResult!!.deviceName}!"
-                    } else {
-                        statusMsg = "失败: ${pairResult?.error}"
+                inspectPeerPayload(peerPayload)
+            }, enabled = identity != null && peerPayload.isNotEmpty()) { Text("查看对方信息") }
+
+            if (peerInfo != null) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("设备: ${peerInfo!!.deviceName}", style = MaterialTheme.typography.titleSmall)
+                        Text("ID: ${peerInfo!!.deviceId}")
+                        Text("指纹: ${peerInfo!!.fingerprint}", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("确认码: ${peerInfo!!.confirmationCode}",
+                                style = MaterialTheme.typography.headlineMedium,
+                                fontFamily = FontFamily.Monospace,
+                                modifier = Modifier.weight(1f))
+                            CopyButton(peerInfo!!.confirmationCode, "确认码")
+                        }
                     }
                 }
-            }, enabled = confirmationInput.isNotEmpty()) { Text("确认配对") }
+                OutlinedTextField(value = confirmationInput, onValueChange = { confirmationInput = it },
+                    label = { Text("输入确认码") }, modifier = Modifier.fillMaxWidth())
+                Button(onClick = {
+                    if (identity != null && peerPayload.isNotEmpty() && confirmationInput.isNotEmpty()) {
+                        val json = RustBridge.confirmPairing(gson.toJson(identity), peerPayload, confirmationInput)
+                        pairResult = try { gson.fromJson(json, PairResultJson::class.java) } catch (_: Exception) { null }
+                        if (pairResult?.success == true) {
+                            // Save peer to trusted list for Send page auto-fill
+                            saveTrustedPeer(
+                                ctx,
+                                peerInfo!!.deviceId,
+                                peerInfo!!.deviceName,
+                                peerInfo!!.fingerprint,
+                                peerPayload
+                            )
+                            statusMsg = "已信任: ${pairResult!!.deviceName}!"
+                        } else {
+                            statusMsg = "失败: ${pairResult?.error}"
+                        }
+                    }
+                }, enabled = confirmationInput.isNotEmpty()) { Text("确认配对") }
+            }
         }
-
-        Divider()
 
         if (statusMsg.isNotEmpty()) {
             Text(statusMsg, color = MaterialTheme.colorScheme.primary)
+        }
+    }
+}
+
+@Composable
+private fun SectionCard(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold
+            )
+            content()
         }
     }
 }
