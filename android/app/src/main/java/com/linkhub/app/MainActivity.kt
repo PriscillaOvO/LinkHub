@@ -12,11 +12,18 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.linkhub.app.bridge.RustBridge
@@ -190,8 +197,13 @@ fun LinkHubMain(
             }
         }
     ) { padding ->
-        Box(modifier = Modifier.padding(padding)) {
-            when (currentTab) {
+        AnimatedContent(
+            targetState = currentTab,
+            transitionSpec = { fadeIn(tween(220)) togetherWith fadeOut(tween(160)) },
+            label = "tab-content",
+            modifier = Modifier.padding(padding),
+        ) { tab ->
+            when (tab) {
                 Tab.Pair -> PairScreen()
                 Tab.Devices -> DevicesScreen()
                 Tab.Send -> SendScreen(sharedUris, onSharedUrisConsumed)
@@ -251,11 +263,55 @@ private fun shareUrisFromIntent(intent: Intent?): List<Uri> {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+// Brand palette — kept in sync with the desktop shell (indigo → violet) so the
+// two clients read as one product.
+private val BrandIndigo = Color(0xFF4361EE)
+private val BrandIndigoLight = Color(0xFF5B7CFA)
+private val BrandViolet = Color(0xFF8B5CF6)
+private val BrandCyan = Color(0xFF06B6D4)
+
+private val LinkHubLightColors = lightColorScheme(
+    primary = BrandIndigo,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFE0E6FF),
+    onPrimaryContainer = Color(0xFF101A4D),
+    secondary = BrandViolet,
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFEDE4FF),
+    onSecondaryContainer = Color(0xFF2A124D),
+    tertiary = BrandCyan,
+    background = Color(0xFFF6F7FB),
+    onBackground = Color(0xFF161826),
+    surface = Color(0xFFFFFFFF),
+    onSurface = Color(0xFF161826),
+    surfaceVariant = Color(0xFFECEEF5),
+    onSurfaceVariant = Color(0xFF5C6275),
+    outline = Color(0xFFC7CCDA),
+)
+
+private val LinkHubDarkColors = darkColorScheme(
+    primary = BrandIndigoLight,
+    onPrimary = Color(0xFF0A1033),
+    primaryContainer = Color(0xFF2A3578),
+    onPrimaryContainer = Color(0xFFDDE3FF),
+    secondary = Color(0xFFB79CFF),
+    onSecondary = Color(0xFF1F1140),
+    secondaryContainer = Color(0xFF3A2B66),
+    onSecondaryContainer = Color(0xFFEADDFF),
+    tertiary = Color(0xFF5FD4E6),
+    background = Color(0xFF0C0E16),
+    onBackground = Color(0xFFEEF0F7),
+    surface = Color(0xFF151823),
+    onSurface = Color(0xFFEEF0F7),
+    surfaceVariant = Color(0xFF272C3B),
+    onSurfaceVariant = Color(0xFFA7ADC0),
+    outline = Color(0xFF3A4152),
+)
+
 @Composable
 fun LinkHubTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = lightColorScheme(),
-        content = content
+        colorScheme = if (isSystemInDarkTheme()) LinkHubDarkColors else LinkHubLightColors,
+        content = content,
     )
 }
