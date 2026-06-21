@@ -26,6 +26,11 @@ pub enum ConnectionPath {
     /// Tor onion service at a peer's identity-derived `.onion` address — crosses
     /// NAT with no signaling/relay server, anonymously, but slowly (Phase 2/3).
     Onion { addr: String },
+    /// I2P destination at a peer's identity-derived `.b32.i2p` address — like
+    /// Onion (serverless, anonymous) but via I2P; needs an external router, so it
+    /// sits just below Onion. Scaffolding only — see
+    /// `docs/spec/设计-i2p-与-torrent-传输.md` (transport not yet implemented).
+    I2p { addr: String },
     /// TURN/relay fallback when hole-punching fails (Stage 5 tail; placeholder).
     CloudRelay,
 }
@@ -37,6 +42,7 @@ impl ConnectionPath {
             ConnectionPath::LanTcp { .. } => TransportKind::LanTcp,
             ConnectionPath::WebRtc => TransportKind::WebRtc,
             ConnectionPath::Onion { .. } => TransportKind::Onion,
+            ConnectionPath::I2p { .. } => TransportKind::I2p,
             ConnectionPath::CloudRelay => TransportKind::CloudRelay,
         }
     }
@@ -52,6 +58,9 @@ pub struct PeerReachability {
     /// A paired peer's `.onion` address (from the trust store), if any — lets us
     /// reach it over Tor with no server.
     pub onion_addr: Option<String>,
+    /// A paired peer's `.b32.i2p` address, if any — reach it over I2P with no
+    /// server. Scaffolding for the planned I2P transport.
+    pub i2p_addr: Option<String>,
     /// Whether a relay (TURN) fallback is configured.
     pub relay_available: bool,
 }
@@ -84,6 +93,9 @@ pub fn plan_connection(reachability: &PeerReachability) -> ConnectionPlan {
     }
     if let Some(addr) = &reachability.onion_addr {
         paths.push(ConnectionPath::Onion { addr: addr.clone() });
+    }
+    if let Some(addr) = &reachability.i2p_addr {
+        paths.push(ConnectionPath::I2p { addr: addr.clone() });
     }
     if reachability.relay_available {
         paths.push(ConnectionPath::CloudRelay);
@@ -133,11 +145,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plan_prefers_lan_then_webrtc_then_onion_then_relay() {
+    fn plan_prefers_lan_then_webrtc_then_onion_then_i2p_then_relay() {
         let plan = plan_connection(&PeerReachability {
             lan_addr: Some("192.168.1.5:8787".into()),
             signaling_available: true,
             onion_addr: Some("abc.onion".into()),
+            i2p_addr: Some("def.b32.i2p".into()),
             relay_available: true,
         });
 
@@ -151,6 +164,9 @@ mod tests {
                 ConnectionPath::Onion {
                     addr: "abc.onion".into()
                 },
+                ConnectionPath::I2p {
+                    addr: "def.b32.i2p".into()
+                },
                 ConnectionPath::CloudRelay,
             ]
         );
@@ -162,6 +178,7 @@ mod tests {
             lan_addr: None,
             signaling_available: false,
             onion_addr: Some("xyz.onion".into()),
+            i2p_addr: None,
             relay_available: false,
         });
 
@@ -174,11 +191,30 @@ mod tests {
     }
 
     #[test]
+    fn plan_uses_i2p_when_only_i2p_known() {
+        let plan = plan_connection(&PeerReachability {
+            lan_addr: None,
+            signaling_available: false,
+            onion_addr: None,
+            i2p_addr: Some("qrs.b32.i2p".into()),
+            relay_available: false,
+        });
+
+        assert_eq!(
+            plan.paths,
+            vec![ConnectionPath::I2p {
+                addr: "qrs.b32.i2p".into()
+            }]
+        );
+    }
+
+    #[test]
     fn plan_skips_lan_when_no_address_known() {
         let plan = plan_connection(&PeerReachability {
             lan_addr: None,
             signaling_available: true,
             onion_addr: None,
+            i2p_addr: None,
             relay_available: false,
         });
 
@@ -197,6 +233,7 @@ mod tests {
             lan_addr: Some("10.0.0.9:8787".into()),
             signaling_available: true,
             onion_addr: None,
+            i2p_addr: None,
             relay_available: false,
         });
 
@@ -217,6 +254,7 @@ mod tests {
             lan_addr: Some("10.0.0.9:8787".into()),
             signaling_available: true,
             onion_addr: None,
+            i2p_addr: None,
             relay_available: false,
         });
 

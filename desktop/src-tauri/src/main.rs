@@ -976,8 +976,10 @@ fn connection_plan(
     let reachability = PeerReachability {
         lan_addr: lan_addr.filter(|addr| !addr.trim().is_empty()),
         signaling_available,
-        // Onion path is wired into the desktop UI in a later phase; not surfaced yet.
+        // Onion / I2P paths are wired into the desktop UI in a later phase; not
+        // surfaced yet.
         onion_addr: None,
+        i2p_addr: None,
         relay_available,
     };
     plan_connection(&reachability)
@@ -997,6 +999,11 @@ fn connection_plan(
             ConnectionPath::Onion { addr } => TransportPath {
                 kind: "onion".into(),
                 label: "Tor 匿名连接 (.onion)".into(),
+                detail: addr.clone(),
+            },
+            ConnectionPath::I2p { addr } => TransportPath {
+                kind: "i2p".into(),
+                label: "I2P 匿名连接 (.b32.i2p)".into(),
                 detail: addr.clone(),
             },
             ConnectionPath::CloudRelay => TransportPath {
