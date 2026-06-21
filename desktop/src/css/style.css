@@ -40,9 +40,9 @@
   --info-soft: var(--accent-soft);
 
   /* Shape + depth */
-  --radius: 12px;
-  --radius-sm: 8px;
-  --radius-lg: 18px;
+  --radius: 14px;
+  --radius-sm: 9px;
+  --radius-lg: 20px;
   --shadow-sm: 0 1px 2px rgba(20, 24, 50, 0.06);
   --shadow: 0 6px 20px -8px rgba(20, 24, 50, 0.18), 0 2px 6px -4px rgba(20, 24, 50, 0.12);
   --shadow-lg: 0 18px 50px -16px rgba(20, 24, 50, 0.30);
@@ -89,14 +89,23 @@
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", Roboto, "Helvetica Neue", sans-serif;
   background: var(--bg);
-  background-image: var(--bg-tint);
-  background-attachment: fixed;
   color: var(--text);
   display: flex;
   flex-direction: column;
   min-height: 100vh;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+}
+/* Ambient mesh gradient — a slow, living wash of light behind everything. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -25% -15% -10%;
+  z-index: -1;
+  background: var(--bg-tint);
+  will-change: transform;
+  animation: ambientDrift 30s ease-in-out infinite alternate;
+  pointer-events: none;
 }
 ::selection { background: var(--accent-soft); }
 
@@ -114,14 +123,27 @@ body {
   align-items: baseline;
   gap: 14px;
 }
+/* A small gradient app mark, drawn purely in CSS so no asset is needed. */
+.app-header::before {
+  content: "";
+  flex: 0 0 auto;
+  align-self: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--brand-from), var(--brand-to));
+  box-shadow: 0 4px 14px -4px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.45);
+}
 .app-header h1 {
   font-size: 1.5rem;
   font-weight: 800;
   letter-spacing: -0.02em;
-  background: linear-gradient(120deg, var(--brand-from), var(--brand-to));
+  background: linear-gradient(120deg, var(--brand-from), var(--brand-to), var(--brand-from));
+  background-size: 220% 100%;
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+  animation: wordmarkShift 9s ease-in-out infinite;
 }
 .app-header .subtitle {
   color: var(--text-secondary);
@@ -180,7 +202,14 @@ main {
   margin: 0 auto;
 }
 .tab-content { display: none; }
-.tab-content.active { display: block; animation: fadeInUp 0.34s var(--ease) both; }
+.tab-content.active { display: block; animation: fadeIn 0.3s var(--ease) both; }
+/* Cards cascade in when their tab opens, for a composed, deliberate feel. */
+.tab-content.active .card { animation: fadeInUp 0.46s var(--ease) both; }
+.tab-content.active .card:nth-child(1) { animation-delay: 0.03s; }
+.tab-content.active .card:nth-child(2) { animation-delay: 0.09s; }
+.tab-content.active .card:nth-child(3) { animation-delay: 0.15s; }
+.tab-content.active .card:nth-child(4) { animation-delay: 0.21s; }
+.tab-content.active .card:nth-child(n + 5) { animation-delay: 0.27s; }
 
 /* ── Cards ──────────────────────────── */
 .card {
@@ -194,11 +223,23 @@ main {
   transition: transform var(--dur) var(--ease), box-shadow var(--dur) var(--ease),
               border-color var(--dur) var(--ease);
 }
+/* A whisper of a gradient along the top edge — catches the light on hover. */
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: linear-gradient(90deg, transparent, var(--accent-soft) 50%, transparent);
+  opacity: 0.6;
+  transition: opacity var(--dur) var(--ease);
+}
 .card:hover {
   transform: translateY(-2px);
   box-shadow: var(--shadow-lg);
   border-color: var(--border-strong);
 }
+.card:hover::before { opacity: 1; }
 .card h3 {
   font-size: 1.02rem;
   font-weight: 700;
@@ -284,11 +325,26 @@ main {
 .btn:active { transform: translateY(1px) scale(0.99); }
 .btn:focus-visible { outline: none; box-shadow: var(--ring); }
 .btn-primary {
+  position: relative;
+  overflow: hidden;
   background: linear-gradient(120deg, var(--accent), var(--accent-strong));
   color: #fff;
   box-shadow: 0 6px 16px -8px var(--accent-glow);
 }
+.btn-primary::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -130%;
+  width: 55%;
+  height: 100%;
+  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.38), transparent);
+  transform: skewX(-18deg);
+  transition: left 0.6s var(--ease);
+  pointer-events: none;
+}
 .btn-primary:hover { filter: brightness(1.06); box-shadow: 0 10px 22px -8px var(--accent-glow); transform: translateY(-1px); }
+.btn-primary:hover::after { left: 140%; }
 .btn-secondary { background: var(--surface-2); color: var(--text); border-color: var(--border-strong); }
 .btn-secondary:hover { background: var(--surface); border-color: var(--accent); color: var(--accent); }
 .btn-danger { background: var(--danger); color: #fff; }
@@ -427,9 +483,21 @@ main {
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); background-clip: content-box; }
 
 /* ── Keyframes ──────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
 @keyframes fadeInUp {
   from { opacity: 0; transform: translateY(8px); }
   to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes ambientDrift {
+  0%   { transform: translate3d(0, 0, 0) scale(1); }
+  100% { transform: translate3d(0, -2.5%, 0) scale(1.08); }
+}
+@keyframes wordmarkShift {
+  0%, 100% { background-position: 0% 50%; }
+  50%      { background-position: 100% 50%; }
 }
 @keyframes slideInMsg {
   from { opacity: 0; transform: translateX(-6px); }
