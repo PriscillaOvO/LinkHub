@@ -776,6 +776,7 @@ fn print_local_identity(identity: &LocalIdentity) {
     println!("device_name={}", identity.device_name());
     println!("fingerprint={}", identity.identity().fingerprint());
     println!("public_key={}", identity.public_key());
+    println!("dh_public_key={}", identity.dh_public_key());
 }
 
 fn run_mdns_advertise(
